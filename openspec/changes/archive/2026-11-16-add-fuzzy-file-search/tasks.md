@@ -24,5 +24,5 @@
 ## 5. Verify
 
 - [x] 5.1 `./install.sh` (check passes) and `herdr-app status` clean
-- [ ] 5.2 In the app: search in a git repo (ignored files absent), a non-repo folder, and a remote space; enter, click and Escape behave per spec
+- [x] 5.2 In the app: search in a git repo (ignored files absent), a non-repo folder, and a remote space; enter, click and Escape behave per spec
 - [x] 5.3 Empty query renders the tree byte-identical to before; screenshot with `herdr-app shot` to compare rows
