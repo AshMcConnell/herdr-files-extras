@@ -17,6 +17,7 @@ folders first.
 - `mods/files-extras/main.js` — the View: folder tree, preview, right-click menu, drop targets.
 - `mods/files-extras/download.js` — save-panel + copy/zip/base64-chunk logic (host calls passed as arguments so it can be tested without the app).
 - `mods/files-extras/upload.js` — drop/picker upload logic, same shape: name uniquifying, local copies, `hc file write` pushes, folder archives.
+- `mods/files-extras/fileops.js` — right-click rename/delete logic, same shape: name checks against one folder listing, `mv`/`rm -rf` on the entry's machine, PowerShell locally on Windows.
 - `mods/files-extras/md.js` — GFM-flavoured Markdown renderer (Tokyo Night palette).
 - `mods/files-extras/*.svg` — icons, referenced as `mods/files-extras/<name>.svg`.
 

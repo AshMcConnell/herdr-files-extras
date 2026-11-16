@@ -6,6 +6,7 @@ import { spaces, panes, focused, exec, readTextFile, writeTextFile, watchFolder,
 import { mdView } from "./md.js";
 import { chooseDestination, downloadFile, downloadFolder, hasZip, sizeText } from "./download.js";
 import { describe, pickUploads, uploadItems } from "./upload.js";
+import { renameEntry, deleteEntry } from "./fileops.js";
 import { rank } from "./fuzzy.js";
 
 function location() {
@@ -154,9 +155,17 @@ function report(r, targetPath) {
 export default class Files extends View {
   init(_props, cx) {
     // The right-click menu is this same mod opened as a pointer popup with
-    // props { menu: { source, name, dir, on } }: it draws just the menu.
+    // props { menu: { source, name, dir, on, target, parent } }: it draws
+    // just the menu, which is either its rows, a rename field, or a delete
+    // confirmation. The field's state is built here, in init, where the
+    // live host call exists — the same rule as the search field.
     this.menu = props()?.menu ?? null;
-    if (this.menu) { this.handle = cx.focus_handle(); this.handle.focus(); return; }
+    if (this.menu) {
+      this.mode = "menu"; this.working = false;
+      this.rename = { input: InputState.new({ value: this.menu.name }), error: null };
+      this.rename.input.on("submit", (_e, cx) => this.doRename(cx));
+      this.handle = cx.focus_handle(); this.handle.focus(); return;
+    }
     this.saved = new Map();
     this.entries = new Map(); this.folders = new Set(); this.pending = new Set(); this.marks = {};
     this.uploading = false;
@@ -228,7 +237,15 @@ export default class Files extends View {
       try {
         for (const path of ["", ...this.folders]) {
           if (!this.current(context)) return;
-          await this.loadFolder(path, context);
+          try { await this.loadFolder(path, context); }
+          catch (e) {
+            // A folder that no longer lists — deleted here through the
+            // menu, or outside the app — just collapses. Only the root
+            // reports, as the panel-wide error it always was.
+            if (path === "") throw e;
+            this.folders.delete(path);
+            this.entries.delete(path);
+          }
         }
         const top = await exec("git", ["rev-parse", "--show-toplevel"], { cwd, on }).catch(() => null);
         const marks = {};
@@ -313,11 +330,13 @@ export default class Files extends View {
     const base = this.root.replace(/[\\/]+$/, "");
     const source = `${base}/${path}`;
     // Uploads go into the row's folder — the row itself when it is a
-    // folder, its parent when it is a file.
+    // folder, its parent when it is a file. Rename and delete always act
+    // on the row's parent, whatever the row is.
     const cut = path.lastIndexOf("/");
     const rel = entry.dir ? path : cut > 0 ? path.slice(0, cut) : "";
-    openOverlay({ mod: "files-extras", kind: "popup", width: 262, height: 106,
-      props: { menu: { source, name: entry.name, dir: entry.dir, on: this.on, target: `${base}${rel ? `/${rel}` : ""}` } } });
+    const parent = cut > 0 ? `${base}/${path.slice(0, cut)}` : base;
+    openOverlay({ mod: "files-extras", kind: "popup", width: 262, height: 170,
+      props: { menu: { source, name: entry.name, dir: entry.dir, on: this.on, target: `${base}${rel ? `/${rel}` : ""}`, parent } } });
   }
 
   choose() {
@@ -337,6 +356,92 @@ export default class Files extends View {
     this.choosing = true;
     const overlay = props().overlay;
     uploadMenu(this.menu).catch(() => {}).finally(() => closeOverlay(overlay));
+  }
+
+  // The rename field: the current name again (the stem preselected, like
+  // Finder), a refusal or failure shown in the menu with the field kept
+  // open, and the popup closing only once a real rename has settled.
+  startRename(cx) {
+    this.mode = "rename";
+    this.rename.error = null;
+    this.rename.input.set_value(this.menu.name);
+    const dot = this.menu.name.lastIndexOf(".");
+    this.rename.input.set_selected_range({ start: 0, end: dot > 0 ? dot : this.menu.name.length });
+    this.rename.input.focus();
+    cx.notify();
+  }
+
+  // Back to the plain rows from the rename field or the delete
+  // confirmation, keyboard and all.
+  back(cx) {
+    this.mode = "menu";
+    this.handle.focus();
+    cx.notify();
+  }
+
+  // The delete confirmation names what goes — a folder says everything
+  // inside it goes too — and nothing has happened until it is confirmed.
+  confirmDelete(cx) {
+    this.mode = "confirm";
+    cx.notify();
+  }
+
+  // Right-click → Rename, submitted from the field: refused names come
+  // back without a toast (the menu shows them), a shell failure toasts
+  // as well, and an unchanged name just closes. The keep-alive rule as
+  // everywhere in this popup: the overlay closes after the work settles,
+  // never while it runs.
+  doRename(cx) {
+    if (this.working) return;
+    const m = this.menu, overlay = props().overlay;
+    const to = this.rename.input.value().trim();
+    this.working = true;
+    this.rename.error = null;
+    cx.notify();
+    renameEntry({ exec, platform: window()?.platform ?? "linux", source: m.source, parent: m.parent, from: m.name, to, on: m.on })
+      .then(moved => {
+        if (moved) notify({ title: `Renamed ${m.name}`, body: `${moved}${m.on ? ` · on ${m.on}` : ""}`, level: "success", timeout: 8000 });
+        closeOverlay(overlay);
+      })
+      .catch(e => {
+        this.rename.error = String(e?.message ?? e);
+        if (!e?.refusal) notify({ title: `Couldn't rename ${m.name}`, body: String(e?.message ?? e), level: "error", timeout: 12000 });
+        cx.notify();
+      })
+      .finally(() => { this.working = false; });
+  }
+
+  // Right-click → Delete, confirmed: one path, permanent, and the popup
+  // closes in a finally so the command is never cut short by its own menu.
+  doDelete(cx) {
+    if (this.working) return;
+    const m = this.menu, overlay = props().overlay;
+    this.working = true;
+    deleteEntry({ exec, platform: window()?.platform ?? "linux", source: m.source, on: m.on })
+      .then(() => notify({ title: `Deleted ${m.name}`, body: m.on ? `on ${m.on}` : m.parent, level: "success", timeout: 8000 }))
+      .catch(e => notify({ title: `Couldn't delete ${m.name}`, body: String(e?.message ?? e), level: "error", timeout: 12000 }))
+      .finally(() => closeOverlay(overlay));
+  }
+
+  // Keys follow the mode: in the rename field only escape is the
+  // container's (typing and enter belong to the input); over the
+  // confirmation enter confirms; on the plain rows the menu's own
+  // shortcuts and escape-to-close hold.
+  menuKey(e, cx) {
+    if (this.mode === "rename") {
+      if (e.key === "escape") this.back(cx);
+      return;
+    }
+    if (this.mode === "confirm") {
+      if (e.key === "enter") this.doDelete(cx);
+      else if (e.key === "escape") this.back(cx);
+      return;
+    }
+    if (e.key === "enter") this.choose();
+    else if (e.key === "u") this.chooseUpload();
+    else if (e.key === "r") this.startRename(cx);
+    else if (e.key === "d") this.confirmDelete(cx);
+    else if (e.key === "escape") closeOverlay(props().overlay);
   }
 
   // Files dropped from outside the app: `target` is the folder they
@@ -491,26 +596,33 @@ export default class Files extends View {
 
   renderMenu() {
     const t = theme(), m = this.menu;
+    // One menu row: icon, label, key hint, hover, click.
+    const row = (id, icon, label, hint, on_click) => h_flex().id(id).h(32).px(9).gap(9).rounded(7).items_center().cursor_pointer().hover(s => s.bg(t.hover))
+      .on_click(on_click)
+      .child(icon ? svg(`mods/files-extras/${icon}.svg`).size(14).flex_none().text_color(t.muted) : div().w(14).flex_none())
+      .child(div().flex_1().min_w(0).truncate().child(label))
+      .child(div().flex_none().text_size(11).text_color(t.dim).child(hint));
+    const head = h_flex().px(9).pt(3).pb(5).gap(7).items_center()
+      .child(svg(`mods/files-extras/${m.dir ? "folder" : "file"}.svg`).size(13).flex_none().text_color(t.muted))
+      .child(div().flex_1().min_w(0).truncate().child(m.name))
+      .when(Boolean(m.on), el => el.child(div().flex_none().max_w(110).truncate().text_size(11).text_color(t.dim).child(`on ${m.on}`)));
     return v_flex().id("files-menu").track_focus(this.handle).w_full().p(5).bg(t.popover).text_size(12.8)
-      .on_key_down(e => {
-        if (e.key === "enter") this.choose();
-        else if (e.key === "u") this.chooseUpload();
-        else if (e.key === "escape") closeOverlay(props().overlay);
-      })
-      .child(h_flex().px(9).pt(3).pb(5).gap(7).items_center()
-        .child(svg(`mods/files-extras/${m.dir ? "folder" : "file"}.svg`).size(13).flex_none().text_color(t.muted))
-        .child(div().flex_1().min_w(0).truncate().child(m.name))
-        .when(Boolean(m.on), el => el.child(div().flex_none().max_w(110).truncate().text_size(11).text_color(t.dim).child(`on ${m.on}`))))
-      .child(h_flex().id("files-menu-download").h(32).px(9).gap(9).rounded(7).items_center().cursor_pointer().hover(s => s.bg(t.hover))
-        .on_click(() => this.choose())
-        .child(svg("mods/files-extras/download.svg").size(14).flex_none().text_color(t.muted))
-        .child(div().flex_1().child(m.dir ? "Download as zip…" : "Download…"))
-        .child(div().text_size(11).text_color(t.dim).child("enter")))
-      .child(h_flex().id("files-menu-upload").h(32).px(9).gap(9).rounded(7).items_center().cursor_pointer().hover(s => s.bg(t.hover))
-        .on_click(() => this.chooseUpload())
-        .child(svg("mods/files-extras/upload.svg").size(14).flex_none().text_color(t.muted))
-        .child(div().flex_1().child("Upload files…"))
-        .child(div().text_size(11).text_color(t.dim).child("u")));
+      .on_key_down((e, cx) => this.menuKey(e, cx))
+      .child(head)
+      .when(this.mode === "rename", el => el
+        .child(h_flex().h(32).px(9).items_center()
+          .child(Input.new(this.rename.input).flex_1().h_full().text_size(12.5).text_color(t.foreground)))
+        .child(div().px(9).min_w(0).truncate().text_size(11)
+          .text_color(this.rename.error ? t.ansi1 : t.dim)
+          .child(this.working ? "Renaming…" : this.rename.error || "enter renames · escape back")))
+      .when(this.mode === "confirm", el => el
+        .child(row("files-menu-delete-go", "trash", m.dir ? `Delete ${m.name} and everything inside it` : `Delete ${m.name}`, "enter", (_e, cx) => this.doDelete(cx)))
+        .child(row("files-menu-delete-back", null, "Keep it", "escape", (_e, cx) => this.back(cx))))
+      .when(this.mode === "menu", el => el
+        .child(row("files-menu-download", "download", m.dir ? "Download as zip…" : "Download…", "enter", () => this.choose()))
+        .child(row("files-menu-upload", "upload", "Upload files…", "u", () => this.chooseUpload()))
+        .child(row("files-menu-rename", "rename", "Rename…", "r", (_e, cx) => this.startRename(cx)))
+        .child(row("files-menu-delete", "trash", "Delete…", "d", (_e, cx) => this.confirmDelete(cx))));
   }
 
   render(cx) {

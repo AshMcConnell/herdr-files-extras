@@ -32,6 +32,14 @@ marks and text preview stay exactly as they were.
   herdr-core (`hc file write`), and folders go as one archive that is
   extracted on the far end — byte-for-byte, verified with the same `cmp`
   you would run on a local copy.
+- **Right-click → Rename… and Delete…** — the menu turns into a name field
+  holding the current name (the stem preselected, like Finder) or a
+  confirmation naming what goes — folders say everything inside it goes
+  too. A name that is taken or carries a separator is refused in place,
+  before anything happens; deletes are permanent on every machine, so the
+  confirmation is the safeguard. Both run on the machine the entry lives
+  on, and the tree catches up on its next refresh — a folder deleted while
+  expanded just collapses, with no error.
 
 Everything else is the shipped panel: it follows the focused pane's folder
 (including a space on another machine), loads folders lazily, marks changed
@@ -107,12 +115,13 @@ edit in the checkout never reloads it).
 ## What it runs
 
 Like any Herdr mod it is trusted code. It runs `exec` with `sh`, `zip`,
-`tar`, `base64`, `dd` and `wc`, plus `osascript` on macOS for the save
-panel and the upload picker; on Windows it uses `powershell` (`Copy-Item`,
-`Compress-Archive`, the OpenFileDialog, base64 decode) and `cmd` for the
-upload redirect. Uploads to another machine run local `hc` (herdr-core),
-which carries the file to that machine. On a space on another machine the
-same commands run there through herdr-core.
+`tar`, `base64`, `dd`, `wc`, `mv` and `rm`, plus `osascript` on macOS for
+the save panel and the upload picker; on Windows it uses `powershell`
+(`Copy-Item`, `Compress-Archive`, `Rename-Item`, `Remove-Item`, the
+OpenFileDialog, base64 decode) and `cmd` for the upload redirect. Uploads
+to another machine run local `hc` (herdr-core), which carries the file to
+that machine. On a space on another machine the same commands run there
+through herdr-core.
 
 It writes only the file or archive you choose, plus temporary base64 pieces
 and upload archives under `~/.config/herdr-app/data/`, which it removes
