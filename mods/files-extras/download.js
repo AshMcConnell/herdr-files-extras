@@ -12,8 +12,8 @@ const CHUNK = 4 * 1024 * 1024 - 1;
 // Characters per temp file, under writeTextFile's 1 MiB text limit.
 const PART = 1000000;
 
-const trimEnd = (path) => path.replace(/[\\/]+$/, "");
-const norm = (path) => trimEnd(path).replace(/\\/g, "/");
+export const trimEnd = (path) => path.replace(/[\\/]+$/, "");
+export const norm = (path) => trimEnd(path).replace(/\\/g, "/");
 const mb = (bytes) => `${(bytes / (1024 * 1024)).toFixed(bytes < 10 * 1024 * 1024 ? 1 : 0)} MB`;
 
 // `foo.txt` at 2 becomes `foo (2).txt`; a dotfile stays whole.
@@ -25,9 +25,9 @@ export function addSuffix(name, n) {
 export const sizeText = mb;
 
 // A single-quoted PowerShell string.
-const psq = (s) => `'${String(s).replace(/['‘’‚‛]/g, "$&$&")}'`;
+export const psq = (s) => `'${String(s).replace(/['‘’‚‛]/g, "$&$&")}'`;
 // A double-quoted AppleScript string.
-const asq = (s) => `"${String(s).replace(/\\/g, "\\\\").replace(/"/g, '\\"')}"`;
+export const asq = (s) => `"${String(s).replace(/\\/g, "\\\\").replace(/"/g, '\\"')}"`;
 
 async function sh(exec, on, script, args = []) {
   return exec("sh", ["-c", script, "download", ...args], { on, timeout: 600000 });
@@ -91,6 +91,14 @@ export async function chooseDestination({ exec, pickFolder, platform, name, last
 export async function hasZip(exec, on, platform) {
   if (!on && platform === "windows") return true;
   return (await sh(exec, on, 'command -v zip >/dev/null 2>&1')).code === 0;
+}
+
+// How a machine can open an uploaded folder archive: "unzip", "tar"
+// (tar + gzip), or null when it has neither — one probe, so the local
+// half of an upload can pick a matching archive format.
+export async function extractor(exec, on) {
+  const r = await sh(exec, on, 'command -v unzip >/dev/null 2>&1 && echo unzip || { command -v tar >/dev/null 2>&1 && echo tar; }');
+  return r.stdout.trim() || null;
 }
 
 async function tempFolder(exec, platform, appHome) {

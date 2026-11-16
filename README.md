@@ -1,9 +1,11 @@
 # Files extras for Herdr
 
-Herdr's Files panel with **right-click downloads** and **Markdown previews**.
-Right-click a file to save a copy to this Mac, or a folder to download it as
-a zip; a space on another machine works the same way and the file is copied
-back from there.
+Herdr's Files panel with **right-click downloads**, **drag & drop uploads**,
+and **Markdown previews**. Right-click a file to save a copy to this Mac, or
+a folder to download it as a zip; a space on another machine works the same
+way and the file is copied back from there. Drag files or folders from
+Finder onto the tree to put them in the folder being browsed — on this
+machine or on another one.
 
 It is a fork of Herdr's shipped `files` mod, so the lazy tree, git status
 marks and text preview stay exactly as they were.
@@ -22,6 +24,14 @@ marks and text preview stay exactly as they were.
   checkboxes, quotes and fenced code, drawn by the same renderer as the
   [OpenSpec mod](https://github.com/AshMcConnell/herdr-openspec), instead of
   the plain code editor.
+- **Drag & drop upload** — drop files or folders from Finder onto the tree:
+  onto a folder row lands them inside it, onto the tree lands them in the
+  browsed folder. A name that is already there arrives as `notes (2).txt`,
+  never overwriting. **Right-click → Upload files…** opens the native file
+  picker instead. On a space on another machine the files are pushed through
+  herdr-core (`hc file write`), and folders go as one archive that is
+  extracted on the far end — byte-for-byte, verified with the same `cmp`
+  you would run on a local copy.
 
 Everything else is the shipped panel: it follows the focused pane's folder
 (including a space on another machine), loads folders lazily, marks changed
@@ -44,9 +54,14 @@ change `files` to `files-extras`. Or ask your agent:
 
 > Read ~/.config/herdr-app/AGENTS.md, then add this mod: herdr.dev/mods/AshMcConnell/herdr-files-extras
 
+From a checkout of this repo, `./install.sh` copies the mod into place and
+checks it; `./install.sh --watch` keeps reinstalling on every save, so Herdr's
+hot reload picks changes up as you edit.
+
 Keep the copied folder real: a symlink to a checkout outside
 `~/.config/herdr-app` loads, but its icons fail to resolve and saves there do
-not hot-reload.
+not hot-reload (verified on the current version: the link loads and runs, an
+edit in the checkout never reloads it).
 
 ## How downloading works
 
@@ -67,17 +82,42 @@ not hot-reload.
 - **Remote files need a Unix-like machine** (`sh`); a Windows remote is not
   supported yet. The local machine can be macOS, Linux or Windows.
 
+## How uploading works
+
+- **Dropping** files or folders from Finder onto the tree puts them in the
+  browsed folder; dropping onto a folder row puts them inside that folder.
+  **Right-click → Upload files…** opens the native file picker
+  (`osascript` with multiple selection on macOS, PowerShell's
+  `OpenFileDialog` elsewhere) and uploads the chosen files into the
+  right-clicked row's folder — a file row means its parent. Files only in
+  the picker; folders arrive by dragging.
+- **Names** never collide: one listing of the target decides, and a name
+  that is taken arrives as `notes (2).txt`. Items already in the target are
+  skipped and reported rather than copied onto themselves.
+- **A local file** is a plain `cp`; **a local folder** a recursive copy.
+- **A file on another machine** is pushed with `hc file write --on
+  <machine>` — herdr-core reads the file from stdin on this Mac and writes
+  it there, creating missing folders, in one call. A folder to another
+  machine goes as a single archive (`zip`, or `tar.gz` by which tools exist
+  on both ends) that is extracted on the far end and removed.
+- The tree expands the folder you uploaded into and reloads, toasts report
+  start, success (count and size) and any per-item failures. Temp archives
+  under `~/.config/herdr-app/data/` are removed afterwards.
+
 ## What it runs
 
 Like any Herdr mod it is trusted code. It runs `exec` with `sh`, `zip`,
 `tar`, `base64`, `dd` and `wc`, plus `osascript` on macOS for the save
-panel; on Windows it uses `powershell` (`Copy-Item`, `Compress-Archive`,
-base64 decode). On a space on another machine the same commands run there
-through herdr-core.
+panel and the upload picker; on Windows it uses `powershell` (`Copy-Item`,
+`Compress-Archive`, the OpenFileDialog, base64 decode) and `cmd` for the
+upload redirect. Uploads to another machine run local `hc` (herdr-core),
+which carries the file to that machine. On a space on another machine the
+same commands run there through herdr-core.
 
 It writes only the file or archive you choose, plus temporary base64 pieces
-under `~/.config/herdr-app/data/`, which it removes afterwards. It never
-writes into the folder it is browsing.
+and upload archives under `~/.config/herdr-app/data/`, which it removes
+afterwards. It never writes into the folder it is browsing except the files
+you asked to put there.
 
 ## Built on
 

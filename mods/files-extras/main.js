@@ -1,10 +1,12 @@
 // A lazy file browser for the focused pane's folder, with bounded read-only previews.
 import { View, div, svg } from "gpui-kit";
-import { v_flex, h_flex, Editor, EditorState } from "gpui-base";
+import { v_flex, h_flex, Editor, EditorState, InputState, Input, ScrollHandle } from "gpui-base";
 import { spaces, panes, focused, exec, readTextFile, writeTextFile, watchFolder, theme, settings, window, props,
   home, appHome, notify, openOverlay, closeOverlay, shared, setShared, pickFolder } from "herdr";
 import { mdView } from "./md.js";
 import { chooseDestination, downloadFile, downloadFolder, hasZip, sizeText } from "./download.js";
+import { describe, pickUploads, uploadItems } from "./upload.js";
+import { rank } from "./fuzzy.js";
 
 function location() {
   // A pane or layout can pin the folder: props { folder: "/path" }. Without
@@ -23,7 +25,11 @@ const LANG = { ts: "js", tsx: "js", mts: "js", cts: "js", jsx: "js", mjs: "js", 
 const MARKDOWN = new Set(["md", "markdown", "mdx"]);
 // An absolute POSIX path, or a Windows drive path (`C:\…` / `C:/…`).
 const absolutePath = (p) => p.startsWith("/") || /^[A-Za-z]:[\\/]/.test(p);
+const baseName = (p) => p.split(/[\\/]/).pop();
 const PER_FOLDER = 500, TOTAL = 5000;
+// Search candidates: files only, capped like the tree is. The extra head
+// line reports the truncation.
+const FILE_CAP = 20000, RESULT_CAP = 200;
 
 async function directory(path, on) {
   const windowsDirectory = async () => {
@@ -48,6 +54,34 @@ async function directory(path, on) {
   const fields = r.stdout.split("\0"), out = [];
   for (let i = 0; i + 1 < fields.length; i += 2) out.push({ name: fields[i + 1], dir: fields[i] === "d" });
   return out;
+}
+
+// The fuzzy search's candidate list for `root`, as paths relative to it:
+// tracked + untracked-but-not-ignored files where git says repository, a
+// .git-pruned recursive listing otherwise, files only and capped. It runs
+// on the folder's machine, like everything else in this panel.
+async function candidateList(exec, root, on) {
+  if (!on && window()?.platform === "windows") return windowsFiles(exec, root);
+  const r = await exec("sh", ["-c",
+    'cd "$1" || exit 9; if git rev-parse --is-inside-work-tree >/dev/null 2>&1; then git ls-files -co --exclude-standard 2>/dev/null; else find . -name .git -prune -o -type f -print 2>/dev/null; fi | head -n 20001',
+    "search", root], { on });
+  if (r.code !== 0) throw new Error(r.stderr || "Cannot list this folder's files");
+  const lines = r.stdout.split("\n").filter(Boolean).map(p => p.replace(/^\.\//, ""));
+  return { files: lines.slice(0, FILE_CAP), truncated: lines.length > FILE_CAP };
+}
+
+// The same for a local Windows folder, through PowerShell: git first
+// (it works there too), a recursive Get-ChildItem otherwise.
+async function windowsFiles(exec, root) {
+  const q = (s) => `'${String(s).replace(/'/g, "''")}'`;
+  const r = await exec("powershell", ["-NoProfile", "-Command",
+    `[Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false); Set-Location -LiteralPath ${q(root)}; ` +
+    `if (git rev-parse --is-inside-work-tree 2>$null) { git ls-files -co --exclude-standard 2>$null | Select-Object -First 20001 } ` +
+    `else { Get-ChildItem -Recurse -Force -File | Where-Object { $_.FullName -notmatch '\\\\.git\\\\' } | Select-Object -First 20001 | ForEach-Object { $_.FullName.Substring((Get-Location).Path.Length + 1) } }`],
+    { timeout: 120000 });
+  if (r.code !== 0) throw new Error(r.stderr || "Cannot list this folder's files");
+  const lines = r.stdout.split("\n").map(s => s.trim()).filter(Boolean);
+  return { files: lines.slice(0, FILE_CAP), truncated: lines.length > FILE_CAP };
 }
 
 // Right-click → Download. Asked where to save every time, starting in the
@@ -79,6 +113,44 @@ async function download(menu) {
   }
 }
 
+// Right-click → Upload files…: the native picker, then the same batch
+// a drop runs. Files only — folders arrive by drag & drop. The menu
+// carries the absolute target folder and its machine.
+async function uploadMenu(menu) {
+  try {
+    const platform = window()?.platform ?? "linux";
+    const picks = await pickUploads({ exec, platform, prompt: `Upload files into ${baseName(menu.target)}` });
+    if (!picks?.length) return;
+    const items = picks.map(p => ({ path: p, name: baseName(p), dir: false }));
+    startToast(items, menu.on, menu.target);
+    report(await uploadItems({ exec, platform, appHome: appHome(), items, target: menu.target, on: menu.on }), menu.target);
+  } catch (e) {
+    notify({ title: "Couldn't upload", body: String(e?.message ?? e), level: "error", timeout: 12000 });
+  }
+}
+
+// The "it started" toast: not for a single local file, which finishes
+// before a toast could matter (the download flow has the same rule).
+function startToast(items, on, targetPath) {
+  if (items.length === 1 && !items[0].dir && !on) return;
+  notify({ title: items.length === 1 ? `Uploading ${items[0].name}` : `Uploading ${items.length} items`,
+    body: on ? `To ${on}` : targetPath, level: "info" });
+}
+
+// The end of a batch: an error toast per failed item, then one
+// success toast — or an "already here" one when everything was
+// skipped, which is worth saying on its own.
+function report(r, targetPath) {
+  for (const f of r.failed) notify({ title: `Couldn't upload ${f.name}`, body: f.message, level: "error", timeout: 12000 });
+  const skipped = r.skipped.length > 3
+    ? `${r.skipped.slice(0, 3).join(", ")} +${r.skipped.length - 3} more` : r.skipped.join(", ");
+  if (r.uploaded) notify({ title: `Uploaded ${r.uploaded === 1 ? "1 item" : `${r.uploaded} items`}`,
+    body: `${targetPath}${r.bytes ? ` · ${sizeText(r.bytes)}` : ""}${skipped ? ` · skipped ${skipped}` : ""}`,
+    level: "success", timeout: 8000 });
+  else if (!r.failed.length && r.skipped.length)
+    notify({ title: "Already here", body: skipped, level: "info", timeout: 8000 });
+}
+
 export default class Files extends View {
   init(_props, cx) {
     // The right-click menu is this same mod opened as a pointer popup with
@@ -87,6 +159,7 @@ export default class Files extends View {
     if (this.menu) { this.handle = cx.focus_handle(); this.handle.focus(); return; }
     this.saved = new Map();
     this.entries = new Map(); this.folders = new Set(); this.pending = new Set(); this.marks = {};
+    this.uploading = false;
     this.code = null; this.md = null;
     // Keep inline link ids unique when more than one Files copy shows the
     // same markdown document (the panel and a pane, say).
@@ -95,6 +168,15 @@ export default class Files extends View {
     // (relative to the folder this copy follows). Cleared once shown, so the
     // 10-second refresh doesn't reopen it after the person goes back.
     this.wanted = typeof props()?.file === "string" ? props().file : null;
+    // Fuzzy search (fzf-style): the field's retained state is built here,
+    // in init, where the live host call exists; the candidate list is
+    // gathered once per folder, the first time a query is typed.
+    this.search = { input: InputState.new({ placeholder: "Search files" }), query: "",
+      files: null, truncated: false, loading: false, error: null, results: [], total: 0, selected: -1 };
+    this.search.input.on("change", (_e, cx) => { this.search.query = this.search.input.value(); this.updateSearch(cx); });
+    this.search.input.on("submit", (_e, cx) => this.openResult(cx));
+    this.handle = cx.focus_handle();
+    this.searchScroll = ScrollHandle.new();
     this.refresh(cx);
     cx.timer.every(10000, cx => this.refresh(cx));
   }
@@ -131,6 +213,10 @@ export default class Files extends View {
       this.context = { key: next, cwd, on }; this.root = cwd; this.on = on; this.entries = new Map(); this.folders = new Set(saved?.folders);
       this.pending = new Set(); this.marks = {}; this.show(keep, cx); this.watched = null; this.error = null; this.limited = false;
       this.loading = false;
+      // The search belongs to the folder it was typed in.
+      const s = this.search;
+      s.files = null; s.truncated = false; s.loading = false; s.error = null; s.results = []; s.total = 0; s.selected = -1;
+      if (s.query) { s.query = ""; s.input.set_value(""); }
       if (saved?.file && !keep) this.show(saved.file, cx);
     }
     if (this.wanted && (this.root || absolutePath(this.wanted))) { const file = this.wanted; this.wanted = null; this.show(file, cx); }
@@ -212,6 +298,7 @@ export default class Files extends View {
       out.push(h_flex().id(`file-${path}`).h(28).flex_none().pl(8 + depth * 18).pr(8).gap(7).items_center().rounded(7).cursor_pointer().hover(s => s.bg(t.hover))
         .on_click((_e, cx) => entry.dir ? this.toggle(path, cx) : this.show(path, cx))
         .on_mouse_down("right", (_e, cx) => { cx.stop_propagation(); this.openMenu(path, entry); })
+        .when(entry.dir, el => el.on_drop((e, cx) => { cx.stop_propagation(); this.onDrop(e.paths, path, cx); }))
         .child(entry.dir ? svg(`mods/files-extras/chevron-${open ? "down" : "right"}.svg`).size(12).flex_none().text_color(t.dim) : div().w(12).flex_none())
         .child(svg(`mods/files-extras/${entry.dir ? "folder" : "file"}.svg`).size(14).flex_none().text_color(t.muted))
         .child(div().flex_1().min_w(0).truncate().child(entry.name))
@@ -223,15 +310,183 @@ export default class Files extends View {
 
   openMenu(path, entry) {
     if (!this.root) return;
-    const source = `${this.root.replace(/[\\/]+$/, "")}/${path}`;
-    openOverlay({ mod: "files-extras", kind: "popup", width: 262, height: 74,
-      props: { menu: { source, name: entry.name, dir: entry.dir, on: this.on } } });
+    const base = this.root.replace(/[\\/]+$/, "");
+    const source = `${base}/${path}`;
+    // Uploads go into the row's folder — the row itself when it is a
+    // folder, its parent when it is a file.
+    const cut = path.lastIndexOf("/");
+    const rel = entry.dir ? path : cut > 0 ? path.slice(0, cut) : "";
+    openOverlay({ mod: "files-extras", kind: "popup", width: 262, height: 106,
+      props: { menu: { source, name: entry.name, dir: entry.dir, on: this.on, target: `${base}${rel ? `/${rel}` : ""}` } } });
   }
 
   choose() {
-    const menu = this.menu;
-    closeOverlay(props().overlay);
-    download(menu);
+    // Keep this copy (and its popup) alive until the download settles:
+    // closing the overlay first would cancel this copy's pending calls,
+    // so the save panel would never open and no toast could show.
+    if (this.choosing) return;
+    this.choosing = true;
+    const overlay = props().overlay;
+    download(this.menu).catch(() => {}).finally(() => closeOverlay(overlay));
+  }
+
+  chooseUpload() {
+    // Same keep-alive as the download's chooser: the popup copy runs
+    // the picker and the batch, and only closes once they settle.
+    if (this.choosing) return;
+    this.choosing = true;
+    const overlay = props().overlay;
+    uploadMenu(this.menu).catch(() => {}).finally(() => closeOverlay(overlay));
+  }
+
+  // Files dropped from outside the app: `target` is the folder they
+  // land in, relative to the browsed root ("" for the root itself).
+  // One batch at a time; the arrivals are revealed when it settles.
+  onDrop(paths, target, cx) {
+    if (!this.root || this.uploading || !paths?.length) return;
+    const context = this.context, root = this.root, on = this.on;
+    const platform = window()?.platform ?? "linux";
+    const targetPath = `${root.replace(/[\\/]+$/, "")}${target ? `/${target}` : ""}`;
+    this.uploading = true;
+    cx.spawn(async cx => {
+      try {
+        const items = await describe(exec, paths, platform);
+        startToast(items, on, targetPath);
+        report(await uploadItems({ exec, platform, appHome: appHome(), items, target: targetPath, on }), targetPath);
+      } catch (e) {
+        notify({ title: "Couldn't upload", body: String(e?.message ?? e), level: "error", timeout: 12000 });
+      } finally {
+        this.uploading = false;
+        if (this.current(context)) this.arrive(target, cx);
+        cx.notify();
+      }
+    });
+  }
+
+  // Open the folder an upload landed in — or reload the root — so the
+  // arrivals show right away. The folder watch would find them
+  // eventually, but only in folders already expanded.
+  arrive(target, cx) {
+    if (target && !this.folders.has(target)) this.toggle(target, cx);
+    else this.refresh(cx);
+  }
+
+  // Re-rank on every keystroke. The candidates are gathered once per
+  // folder, on the first query; until they land the panel says it is
+  // searching.
+  updateSearch(cx) {
+    const s = this.search, query = s.query.trim();
+    if (!query) { s.results = []; s.total = 0; s.selected = -1; cx.notify(); return; }
+    if (s.files === null && !s.loading) this.gatherFiles(cx);
+    if (s.files !== null) {
+      const { results, total } = rank(query, s.files, RESULT_CAP);
+      s.results = results; s.total = total;
+      s.selected = results.length ? 0 : -1;
+      this.revealSelected();
+    }
+    cx.notify();
+  }
+
+  gatherFiles(cx) {
+    const context = this.context;
+    this.search.loading = true;
+    cx.spawn(async (cx) => {
+      try {
+        const { files, truncated } = await candidateList(exec, this.root, this.on);
+        if (!this.current(context)) return;
+        this.search.files = files; this.search.truncated = truncated; this.search.error = null;
+      } catch (e) {
+        if (this.current(context)) { this.search.files = []; this.search.error = String(e?.message ?? e); }
+      } finally {
+        if (this.current(context)) { this.search.loading = false; this.updateSearch(cx); }
+      }
+    });
+  }
+
+  clearSearch(cx) {
+    const s = this.search;
+    s.input.set_value(""); s.query = ""; s.results = []; s.total = 0; s.selected = -1;
+    cx.notify();
+  }
+
+  openResult(cx) {
+    const r = this.search.results[this.search.selected];
+    if (!r) return;
+    this.clearSearch(cx);
+    this.show(r.path, cx);
+  }
+
+  // Keep the selected row visible as the selection moves.
+  revealSelected() {
+    const s = this.search;
+    if (s.selected < 0) return;
+    const ahead = (s.error ? 1 : 0) + (s.loading && s.files === null && !s.error ? 1 : 0);
+    this.searchScroll.scroll_to_item(s.selected + ahead);
+  }
+
+  key(e, cx) {
+    const s = this.search;
+    if (e.key === "escape") {
+      cx.stop_propagation();
+      if (s.query) this.clearSearch(cx);
+      else s.input.release();
+      cx.notify();
+    } else if (e.key === "down" && s.results.length) {
+      cx.stop_propagation();
+      s.selected = Math.min(s.selected + 1, s.results.length - 1);
+      this.revealSelected();
+      cx.notify();
+    } else if (e.key === "up" && s.results.length) {
+      cx.stop_propagation();
+      s.selected = Math.max(s.selected - 1, 0);
+      this.revealSelected();
+      cx.notify();
+    }
+  }
+
+  field(t) {
+    return h_flex().h(32).flex_none().px(10).gap(7).items_center().border_b(1).border_color(t.border)
+      .child(svg("mods/workspace-chrome/search.svg").size(13).flex_none().text_color(t.dim))
+      .child(Input.new(this.search.input).flex_1().h_full().text_size(12.5).text_color(t.foreground));
+  }
+
+  results(t) {
+    const s = this.search;
+    return v_flex().id("files-search").flex_1().min_h(0).overflow_y_scrollbar().track_scroll(this.searchScroll).p(6)
+      .when(Boolean(s.error), el => el.child(div().p(8).text_size(12).text_color(t.dim).child(s.error)))
+      .when(s.loading && s.files === null && !s.error, el => el.child(div().p(8).text_size(12).text_color(t.dim).child("Searching files…")))
+      .children(s.results.map((r, i) => this.resultRow(r, i, t)))
+      .when(!s.results.length && s.files !== null && !s.loading && !s.error, el => el.child(div().p(8).text_size(12).text_color(t.dim).child("No matches")))
+      .when(s.total > s.results.length, el => el.child(div().p(8).text_size(11).text_color(t.dim).child(`and ${(s.total - s.results.length).toLocaleString()} more matches`)))
+      .when(Boolean(s.truncated), el => el.child(div().p(8).text_size(11).text_color(t.dim).child(`Search list truncated at ${FILE_CAP.toLocaleString()} files`)));
+  }
+
+  resultRow(r, i, t) {
+    const s = this.search, matched = new Set(r.indices), base = r.path.lastIndexOf("/") + 1;
+    // Styled runs laid out inline (h_flex + flex_none, like the markdown
+    // renderer's words — a block child would wrap the line). Basename
+    // first, so a long folder clips at its far end and the part being
+    // picked stays visible. Brightness ladder: dim < muted < foreground,
+    // so matches always read brighter than their surroundings.
+    const runs = (from, to, hit, rest) => {
+      const out = [];
+      for (let j = from; j < to;) {
+        const isHit = matched.has(j);
+        let end = j + 1;
+        while (end < to && matched.has(end) === isHit) end++;
+        out.push(div().flex_none().text_color(isHit ? hit : rest).child(r.path.slice(j, end)));
+        j = end;
+      }
+      return out;
+    };
+    return h_flex().id(`search-${i}`).h(28).flex_none().pl(8).pr(8).gap(7).items_center().rounded(7).cursor_pointer()
+      .when(i === s.selected, el => el.bg(t.selected))
+      .hover(st => st.bg(t.hover))
+      .on_click((_e, cx) => { s.selected = i; this.openResult(cx); })
+      .child(svg("mods/files-extras/file.svg").size(14).flex_none().text_color(t.muted))
+      .child(h_flex().flex_1().min_w(0).overflow_hidden()
+        .children(runs(base, r.path.length, t.foreground, t.muted))
+        .children(runs(0, base, t.muted, t.dim)));
   }
 
   renderMenu() {
@@ -239,6 +494,7 @@ export default class Files extends View {
     return v_flex().id("files-menu").track_focus(this.handle).w_full().p(5).bg(t.popover).text_size(12.8)
       .on_key_down(e => {
         if (e.key === "enter") this.choose();
+        else if (e.key === "u") this.chooseUpload();
         else if (e.key === "escape") closeOverlay(props().overlay);
       })
       .child(h_flex().px(9).pt(3).pb(5).gap(7).items_center()
@@ -249,24 +505,34 @@ export default class Files extends View {
         .on_click(() => this.choose())
         .child(svg("mods/files-extras/download.svg").size(14).flex_none().text_color(t.muted))
         .child(div().flex_1().child(m.dir ? "Download as zip…" : "Download…"))
-        .child(div().text_size(11).text_color(t.dim).child("enter")));
+        .child(div().text_size(11).text_color(t.dim).child("enter")))
+      .child(h_flex().id("files-menu-upload").h(32).px(9).gap(9).rounded(7).items_center().cursor_pointer().hover(s => s.bg(t.hover))
+        .on_click(() => this.chooseUpload())
+        .child(svg("mods/files-extras/upload.svg").size(14).flex_none().text_color(t.muted))
+        .child(div().flex_1().child("Upload files…"))
+        .child(div().text_size(11).text_color(t.dim).child("u")));
   }
 
   render(cx) {
     if (this.menu) return this.renderMenu();
     if (key() !== this.context?.key) this.refresh(cx);
-    const t = theme();
+    const t = theme(), q = this.search.query.trim();
     return v_flex().id("files").size_full().min_h(0).rounded(10).overflow_hidden().bg(t.background).border_1().border_color(t.border).text_color(t.foreground).text_size(13)
+      .track_focus(this.handle)
+      .on_key_down((e, cx) => this.key(e, cx))
       .child(h_flex().h(42).flex_none().px(14).gap(8).items_center().border_b(1).border_color(t.border)
         .when(Boolean(this.file), el => el.child(div().id("files-back").w(20).cursor_pointer().text_color(t.muted).on_click((_e, cx) => { this.show(null); cx.notify(); }).child("←")))
         .child(div().font_semibold().child("Files"))
         .child(div().flex_1().min_w(0).truncate().text_right().text_size(12).text_color(t.dim).child(this.file ?? this.root?.split(/[\\/]/).pop() ?? "")))
-      .when(!this.file, el => el.child(v_flex().id("files-tree").flex_1().min_h(0).overflow_y_scrollbar().p(6).children(this.rows("", 0, [], t))
-        .when(Boolean(this.error) || !this.entries.get("")?.length, el => el.child(div().p(8).text_size(12).text_color(t.dim).child(this.error || (this.loading ? "Loading files…" : this.root ? "No files" : "No folder"))))
-        .when(this.limited, el => el.child(div().p(8).text_size(11).text_color(t.dim).child("File list limited to 500 entries per folder and 5,000 total")))))
-      .when(Boolean(this.file), el => el.child(this.md !== null
+      .child(this.field(t))
+      .when(Boolean(q), el => el.child(this.results(t)))
+      .when(Boolean(this.file) && !q, el => el.child(this.md !== null
         ? this.md === "" ? div().p(12).text_color(t.dim).child("Empty file")
           : v_flex().id(`files-extras-${this.mdPrefix}`).flex_1().min_h(0).overflow_y_scrollbar().child(mdView(this.md, this.mdPrefix))
-        : this.code ? Editor.new(this.code).flex_1().min_h(0) : div().p(12).text_color(t.dim).child(this.fileError || "Loading file…")));
+        : this.code ? Editor.new(this.code).flex_1().min_h(0) : div().p(12).text_color(t.dim).child(this.fileError || "Loading file…")))
+      .when(!this.file && !q, el => el.child(v_flex().id("files-tree").flex_1().min_h(0).overflow_y_scrollbar().p(6).children(this.rows("", 0, [], t))
+        .on_drop((e, cx) => this.onDrop(e.paths, "", cx))
+        .when(Boolean(this.error) || !this.entries.get("")?.length, el => el.child(div().p(8).text_size(12).text_color(t.dim).child(this.error || (this.loading ? "Loading files…" : this.root ? "No files" : "No folder"))))
+        .when(this.limited, el => el.child(div().p(8).text_size(11).text_color(t.dim).child("File list limited to 500 entries per folder and 5,000 total")))));
   }
 }
