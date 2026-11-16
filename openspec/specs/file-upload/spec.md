@@ -32,12 +32,17 @@ rows SHALL NOT be drop targets.
 
 ### Requirement: Right-click Upload opens the native picker
 The row menu SHALL offer "Upload files…": on a folder row it targets
-that folder, on a file row the file's parent folder. Choosing it
-SHALL open the platform's native file picker with multiple selection
-(osascript on macOS, PowerShell on Windows), resolve to the chosen
-files or end silently when the person cancels, and the menu's `u` key
-SHALL run it while `enter` keeps running Download and `escape` keeps
-closing.
+that folder, on a file row the file's parent folder. Right-clicking the
+tree where there is no row — an empty folder, or the space below the
+rows — SHALL open the same menu scoped to uploads alone, targeting the
+browsed root, and SHALL do nothing when the panel shows no folder.
+Choosing it SHALL open the platform's native picker with multiple
+selection — on macOS an NSOpenPanel that selects files and folders
+together, elsewhere (PowerShell) files only — resolve to the chosen
+items or end silently when the person cancels, and the menu's
+`u` key SHALL run it while `enter` keeps running Download and `escape`
+keeps closing. A picked folder SHALL arrive whole, by the same path a
+dropped folder takes.
 
 #### Scenario: Upload into a folder row's folder
 - **WHEN** the user right-clicks the folder row `assets`, picks
@@ -48,6 +53,18 @@ closing.
 - **WHEN** the user right-clicks the file row `src/main.js`, picks
   "Upload files…", and selects a file
 - **THEN** it arrives in `src` alongside `main.js`
+
+#### Scenario: A picked folder arrives whole
+- **WHEN** the user picks "Upload files…" and selects a folder holding
+  `a/b.txt` along with a loose file
+- **THEN** both arrive — the folder with `a/b.txt` inside it, the file
+  beside it — exactly as a drop of the same two items would
+
+#### Scenario: Right-click on empty tree space targets the root
+- **WHEN** the browsed folder is empty and the user right-clicks the
+  tree's "No files" space and picks "Upload files…"
+- **THEN** the picker opens and the chosen files arrive in the browsed
+  root, the menu offering no Download, Rename or Delete
 
 #### Scenario: Cancelling the picker copies nothing
 - **WHEN** the user closes the native picker without choosing

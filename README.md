@@ -28,7 +28,9 @@ marks and text preview stay exactly as they were.
   onto a folder row lands them inside it, onto the tree lands them in the
   browsed folder. A name that is already there arrives as `notes (2).txt`,
   never overwriting. **Right-click → Upload files…** opens the native file
-  picker instead. On a space on another machine the files are pushed through
+  picker instead — and right-clicking the tree's empty space (an empty
+  folder, say) offers it too, aimed at the browsed root. On a space on
+  another machine the files are pushed through
   herdr-core (`hc file write`), and folders go as one archive that is
   extracted on the far end — byte-for-byte, verified with the same `cmp`
   you would run on a local copy.
@@ -94,11 +96,12 @@ edit in the checkout never reloads it).
 
 - **Dropping** files or folders from Finder onto the tree puts them in the
   browsed folder; dropping onto a folder row puts them inside that folder.
-  **Right-click → Upload files…** opens the native file picker
-  (`osascript` with multiple selection on macOS, PowerShell's
-  `OpenFileDialog` elsewhere) and uploads the chosen files into the
-  right-clicked row's folder — a file row means its parent. Files only in
-  the picker; folders arrive by dragging.
+  **Right-click → Upload files…** opens the native file picker and
+  uploads the chosen items into the right-clicked row's folder — a file
+  row means its parent. On macOS the picker (an `NSOpenPanel` through
+  `osascript`) selects files and folders together, several at a time;
+  elsewhere it is PowerShell's `OpenFileDialog`, which is files-only, so
+  folders arrive by dragging.
 - **Names** never collide: one listing of the target decides, and a name
   that is taken arrives as `notes (2).txt`. Items already in the target are
   skipped and reported rather than copied onto themselves.

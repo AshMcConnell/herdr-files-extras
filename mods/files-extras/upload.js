@@ -157,16 +157,44 @@ export async function uploadFolder({ exec, platform, appHome, source, name, targ
   }
 }
 
-// The native file picker, several files at once: AppleScript on macOS
-// (POSIX paths, one per line), Windows' OpenFileDialog elsewhere.
+// The native file picker, several items at once — files and folders both.
+// macOS opens an NSOpenPanel (AppleScript's `choose file` cannot select
+// folders) through AppleScriptObjC, POSIX paths one per line; Windows'
+// OpenFileDialog stays files-only, so folders arrive there by dragging.
 // Cancelling comes back as null and copies nothing.
 export async function pickUploads({ exec, platform, prompt }) {
   const dead = (e) => { throw new Error(String(e?.message ?? e).trim() || "The file picker did not open (drag files in instead)"); };
   if (platform === "macos") {
-    const script = `set out to ""\nrepeat with f in (choose file with prompt ${asq(prompt)} with multiple selections allowed)\nset out to out & (POSIX path of f) & linefeed\nend repeat\nreturn out`;
+    const script = `use framework "AppKit"
+-- The panel belongs to osascript, which runs with a prohibited window
+-- policy: it would open behind every window and vanish on the first
+-- click. Making this process a regular app (then letting activation
+-- land for a beat) is what puts the panel in front and keeps it there.
+set a to current application's NSApplication's sharedApplication()
+a's setActivationPolicy:(current application's NSApplicationActivationPolicyRegular)
+a's activateIgnoringOtherApps:(true)
+delay 0.3
+set p to current application's NSOpenPanel's openPanel()
+p's setCanChooseFiles:true
+p's setCanChooseDirectories:true
+p's setAllowsMultipleSelection:true
+p's setTitle:${asq(prompt)}
+p's setPrompt:"Upload"
+set res to p's runModal()
+if res as integer = 1 then
+  set out to ""
+  -- AppleScript lowercases the first letter of a selector, so URLs
+  -- must go through performSelector to keep its capital U; the NSArray
+  -- is enumerated as-is (coercing it to a list would turn the NSURLs
+  -- into AppleScript file objects, which do not answer path).
+  repeat with u in (p's performSelector:"URLs")
+    set out to out & ((u's path()) as text) & linefeed
+  end repeat
+  return out
+end if
+return ""`;
     const r = await exec("osascript", ["-e", script], { timeout: 600000 }).catch(e => ({ code: -1, stdout: "", stderr: String(e) }));
-    if (r.code === 0) return r.stdout.split("\n").map(s => s.trim()).filter(Boolean);
-    if (/User canceled|\(-128\)/i.test(r.stderr)) return null;
+    if (r.code === 0) return r.stdout.trim() ? r.stdout.split("\n").map(s => s.trim()).filter(Boolean) : null;
     return dead(new Error(r.stderr));
   }
   const script = `Add-Type -AssemblyName System.Windows.Forms; $d = New-Object System.Windows.Forms.OpenFileDialog; $d.Title = ${psq(prompt)}; $d.Multiselect = $true; if ($d.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) { [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false); [Console]::Out.Write(($d.FileNames -join ([string][char]0))) }`;

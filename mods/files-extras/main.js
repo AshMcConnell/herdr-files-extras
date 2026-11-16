@@ -115,14 +115,15 @@ async function download(menu) {
 }
 
 // Right-click → Upload files…: the native picker, then the same batch
-// a drop runs. Files only — folders arrive by drag & drop. The menu
+// a drop runs. Files and folders both — the picker returns paths, and
+// describe decides what each one is, exactly as a drop does. The menu
 // carries the absolute target folder and its machine.
 async function uploadMenu(menu) {
   try {
     const platform = window()?.platform ?? "linux";
     const picks = await pickUploads({ exec, platform, prompt: `Upload files into ${baseName(menu.target)}` });
     if (!picks?.length) return;
-    const items = picks.map(p => ({ path: p, name: baseName(p), dir: false }));
+    const items = await describe(exec, picks, platform);
     startToast(items, menu.on, menu.target);
     report(await uploadItems({ exec, platform, appHome: appHome(), items, target: menu.target, on: menu.on }), menu.target);
   } catch (e) {
@@ -339,6 +340,16 @@ export default class Files extends View {
       props: { menu: { source, name: entry.name, dir: entry.dir, on: this.on, target: `${base}${rel ? `/${rel}` : ""}`, parent } } });
   }
 
+  // Right-click on the tree itself — its empty space, the only target an
+  // empty folder has: uploads into the browsed root, nothing else, since
+  // there is no entry to download, rename or delete.
+  openRootMenu() {
+    if (!this.root) return;
+    const base = this.root.replace(/[\\/]+$/, "");
+    openOverlay({ mod: "files-extras", kind: "popup", width: 262, height: 74,
+      props: { menu: { source: null, name: base.split(/[\\/]/).pop(), dir: true, on: this.on, target: base, rootMenu: true } } });
+  }
+
   choose() {
     // Keep this copy (and its popup) alive until the download settles:
     // closing the overlay first would cancel this copy's pending calls,
@@ -437,10 +448,10 @@ export default class Files extends View {
       else if (e.key === "escape") this.back(cx);
       return;
     }
-    if (e.key === "enter") this.choose();
+    if (e.key === "enter" && !this.menu.rootMenu) this.choose();
     else if (e.key === "u") this.chooseUpload();
-    else if (e.key === "r") this.startRename(cx);
-    else if (e.key === "d") this.confirmDelete(cx);
+    else if (e.key === "r" && !this.menu.rootMenu) this.startRename(cx);
+    else if (e.key === "d" && !this.menu.rootMenu) this.confirmDelete(cx);
     else if (e.key === "escape") closeOverlay(props().overlay);
   }
 
@@ -618,11 +629,12 @@ export default class Files extends View {
       .when(this.mode === "confirm", el => el
         .child(row("files-menu-delete-go", "trash", m.dir ? `Delete ${m.name} and everything inside it` : `Delete ${m.name}`, "enter", (_e, cx) => this.doDelete(cx)))
         .child(row("files-menu-delete-back", null, "Keep it", "escape", (_e, cx) => this.back(cx))))
-      .when(this.mode === "menu", el => el
-        .child(row("files-menu-download", "download", m.dir ? "Download as zip…" : "Download…", "enter", () => this.choose()))
-        .child(row("files-menu-upload", "upload", "Upload files…", "u", () => this.chooseUpload()))
-        .child(row("files-menu-rename", "rename", "Rename…", "r", (_e, cx) => this.startRename(cx)))
-        .child(row("files-menu-delete", "trash", "Delete…", "d", (_e, cx) => this.confirmDelete(cx))));
+      .when(this.mode === "menu", el => (m.rootMenu
+        ? el.child(row("files-menu-upload", "upload", "Upload files…", "u", () => this.chooseUpload()))
+        : el.child(row("files-menu-download", "download", m.dir ? "Download as zip…" : "Download…", "enter", () => this.choose()))
+          .child(row("files-menu-upload", "upload", "Upload files…", "u", () => this.chooseUpload()))
+          .child(row("files-menu-rename", "rename", "Rename…", "r", (_e, cx) => this.startRename(cx)))
+          .child(row("files-menu-delete", "trash", "Delete…", "d", (_e, cx) => this.confirmDelete(cx)))));
   }
 
   render(cx) {
@@ -644,6 +656,7 @@ export default class Files extends View {
         : this.code ? Editor.new(this.code).flex_1().min_h(0) : div().p(12).text_color(t.dim).child(this.fileError || "Loading file…")))
       .when(!this.file && !q, el => el.child(v_flex().id("files-tree").flex_1().min_h(0).overflow_y_scrollbar().p(6).children(this.rows("", 0, [], t))
         .on_drop((e, cx) => this.onDrop(e.paths, "", cx))
+        .on_mouse_down("right", (_e, cx) => { cx.stop_propagation(); this.openRootMenu(); })
         .when(Boolean(this.error) || !this.entries.get("")?.length, el => el.child(div().p(8).text_size(12).text_color(t.dim).child(this.error || (this.loading ? "Loading files…" : this.root ? "No files" : "No folder"))))
         .when(this.limited, el => el.child(div().p(8).text_size(11).text_color(t.dim).child("File list limited to 500 entries per folder and 5,000 total")))));
   }
