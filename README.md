@@ -5,24 +5,26 @@ Herdr's Files panel with **right-click downloads**, **drag & drop uploads**,
 copy to this Mac, or a folder to download it as a zip; a space on another
 machine works the same way and the file is copied back from there. Drag files
 or folders from Finder onto the tree to put them in the folder being browsed —
-on this machine or on another one. Right-click an image to see it in a popup.
+on this machine or on another one. Click an image to open it in a window.
 
 It is a fork of Herdr's shipped `files` mod, so the lazy tree, git status
 marks and text preview stay exactly as they were.
 
 ![The Download menu over the Files panel](preview.png)
 
-Right-click an image and choose **Preview image…**; the popup scales the
-picture to fit:
+Clicking an image opens it in a window. Drag its header to move it and its
+bottom-right corner to resize it; the header button switches between the
+filled size and 760 × 580:
 
-![An image preview popup](image-preview.png)
+![An image preview window](image-preview.png)
 
 ## What it adds
 
-- **Right-click an image → Preview image…** The picture opens in a popup,
-  scaled to fit and up to 32 MB. Esc, the ✕, or a click outside closes it; the
-  temp copy goes with it. An image on another machine is brought back first,
-  like a download.
+- **Click an image → preview window** — the picture opens filled, up to 32 MB.
+  Drag the header to move it and the bottom-right corner to resize it; the
+  header button toggles between filled and 760 × 580. Esc or ✕ closes it, and
+  the temp copy goes with it. **Right-click → Preview image…** does the same.
+  An image on another machine is brought back first, like a download.
 - **Right-click a file → Download…** A save panel opens at the last folder
   you used (the first time, `~/Downloads`). The file is copied there; on a
   space on another machine it is first brought back from that machine.
@@ -126,15 +128,18 @@ edit in the checkout never reloads it).
 
 ## How image previews work
 
+- Clicking an image, or **right-click → Preview image…**, opens a movable,
+  resizable window. It starts filled to the work area; the header button
+  shrinks it to 760 × 580, and the bottom-right grip resizes it freely.
 - Herdr's `image()` loads pictures from its own folder
   (`~/.config/herdr-app`), not from an absolute path. So an image is copied
   first to `data/files-preview-<time>-<random>/image.<ext>`; a local file is a
   `cp`, and a file on another machine takes the same base64 trip as a
-  download. The temp folder is removed when the popup closes.
+  download. The temp folder is removed when the window closes.
 - The size is read before the copy. Previews stop at 32 MB; a missing file,
-  an empty file and a staging failure each say what happened in the popup.
-- The picture keeps its shape and is scaled down to fit; a small picture is
-  not enlarged.
+  an empty file and a staging failure each say what happened in the window.
+- The picture keeps its shape and is scaled down to fit the window; a small
+  picture is not enlarged.
 
 ## What it runs
 

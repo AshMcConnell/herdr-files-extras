@@ -28,6 +28,30 @@ const MARKDOWN = new Set(["md", "markdown", "mdx"]);
 // An absolute POSIX path, or a Windows drive path (`C:\…` / `C:/…`).
 const absolutePath = (p) => p.startsWith("/") || /^[A-Za-z]:[\\/]/.test(p);
 const baseName = (p) => p.split(/[\\/]/).pop();
+// The preview window's smallest size and where it opens: a small margin
+// from the app window's top-left, leaving its tab bar visible.
+const PREVIEW_MIN = { width: 360, height: 260 };
+const previewAt = () => {
+  const v = previewViewport();
+  return v ? { x: Math.round(v.width * 0.015), y: Math.round(v.height * 0.03) } : { x: 40, y: 64 };
+};
+const clamp = (n, lo, hi) => Math.min(hi, Math.max(lo, n));
+// `herdr`'s `window` is the app's platform object; the global one is GPUI's
+// window and knows the drawable area. Overlay sizes are zoomed layout px,
+// while `at` and the viewport are window pixels, so the two are not the
+// same unit when the person has zoomed the app.
+const previewViewport = () => {
+  try {
+    const v = globalThis.window?.viewport_size?.();
+    return v && Number.isFinite(v.width) && v.width > 0 ? v : null;
+  } catch {
+    return null;
+  }
+};
+const previewZoom = () => {
+  const z = Number(settings().zoom);
+  return Number.isFinite(z) && z > 0 ? z : 1;
+};
 const PER_FOLDER = 500, TOTAL = 5000;
 // Search candidates: files only, capped like the tree is. The extra head
 // line reports the truncation.
@@ -168,9 +192,24 @@ export default class Files extends View {
       this.rename.input.on("submit", (_e, cx) => this.doRename(cx));
       this.handle = cx.focus_handle(); this.handle.focus(); return;
     }
-    // The image preview is another popup with props { image: { source, name, on } }.
+    // The image preview is a movable, resizable window with
+    // props { image: { source, name, on } }.
     this.picture = props()?.image ?? null;
-    if (this.picture) { this.handle = cx.focus_handle(); this.handle.focus(); this.loadPicture(cx); return; }
+    if (this.picture) {
+      this.handle = cx.focus_handle(); this.handle.focus();
+      const view = previewViewport() ?? { width: 1200, height: 800 };
+      const at = previewAt(), zoom = previewZoom();
+      this.zoom = zoom;
+      this.maxW = Math.max(PREVIEW_MIN.width, Math.floor((view.width - at.x - 24) / zoom));
+      this.maxH = Math.max(PREVIEW_MIN.height, Math.floor((view.height - at.y - 48) / zoom));
+      // Every click starts filled; the header button or the corner grip
+      // changes this copy, not a remembered size from another one.
+      this.w = this.maxW;
+      this.h = this.maxH;
+      this.drag = null;
+      this.loadPicture(cx);
+      return;
+    }
     this.saved = new Map();
     this.entries = new Map(); this.folders = new Set(); this.pending = new Set(); this.marks = {};
     this.uploading = false;
@@ -293,10 +332,14 @@ export default class Files extends View {
   show(path, cx) {
     this.code?.release(); this.code = null; this.md = null; this.file = path; this.fileError = null;
     if (!path || !cx) return;
-    // The panel shows text; an image belongs in the preview popup.
-    if (isImage(path)) { this.fileError = "Image · right-click and choose Preview image…"; return; }
     const context = this.context, root = this.root, on = this.on;
     const target = absolutePath(path) ? path : `${root}/${path}`;
+    // An image opens in its own window; the panel stays on the tree.
+    if (isImage(path)) {
+      this.file = null;
+      this.openPicture({ source: target, name: baseName(path), on });
+      return;
+    }
     cx.spawn(async cx => {
       try {
         const text = await readTextFile(target, { on });
@@ -355,7 +398,10 @@ export default class Files extends View {
       if (out.length >= TOTAL) break;
       const path = prefix ? `${prefix}/${entry.name}` : entry.name, open = this.folders.has(path), mark = this.marks[`${this.root}/${path}`];
       out.push(h_flex().id(`file-${path}`).h(28).flex_none().pl(8 + depth * 18).pr(8).gap(7).items_center().rounded(7).cursor_pointer().hover(s => s.bg(t.hover))
-        .on_click((_e, cx) => entry.dir ? this.toggle(path, cx) : this.show(path, cx))
+        .on_click((_e, cx) => {
+          if (entry.dir) this.toggle(path, cx);
+          else { this.show(path, cx); cx.notify(); }
+        })
         .on_mouse_down("right", (_e, cx) => { cx.stop_propagation(); this.openMenu(path, entry); })
         .when(entry.dir, el => el.on_drop((e, cx) => { cx.stop_propagation(); this.onDrop(e.paths, path, cx); }))
         .child(entry.dir ? svg(`mods/files-extras/chevron-${open ? "down" : "right"}.svg`).size(12).flex_none().text_color(t.dim) : div().w(12).flex_none())
@@ -490,7 +536,7 @@ export default class Files extends View {
       else if (e.key === "escape") this.back(cx);
       return;
     }
-    if (e.key === "enter" && !this.menu.rootMenu) this.menu.image ? this.openPicture() : this.choose();
+    if (e.key === "enter" && !this.menu.rootMenu) this.menu.image ? this.openPicture(this.menu, true) : this.choose();
     else if (e.key === "u") this.chooseUpload();
     else if (e.key === "r" && !this.menu.rootMenu) this.startRename(cx);
     else if (e.key === "d" && !this.menu.rootMenu) this.confirmDelete(cx);
@@ -647,11 +693,21 @@ export default class Files extends View {
         .children(runs(0, base, t.muted, t.dim)));
   }
 
-  openPicture() {
-    const menu = this.menu;
-    openOverlay({ mod: "files-extras", kind: "popup", width: 760, height: 580,
-      props: { image: { source: menu.source, name: menu.name, on: menu.on } } });
-    closeOverlay(props().overlay);
+  // A click on an image opens this, and so does the menu's Preview row: one
+  // movable, resizable window, kept for the next image by its key.
+  openPicture(image, fromMenu = false) {
+    openOverlay({ mod: "files-extras", kind: "window", key: "files-extras-image", at: previewAt(),
+      props: { image: { source: image.source, name: image.name, on: image.on } } });
+    if (fromMenu) closeOverlay(props().overlay);
+  }
+
+  // The header's size button: fill the app window or shrink to 760 × 580.
+  toggleSize(cx) {
+    const big = this.w >= this.maxW - 2 && this.h >= this.maxH - 2;
+    this.w = big ? Math.min(760, this.maxW) : this.maxW;
+    this.h = big ? Math.min(580, this.maxH) : this.maxH;
+    if (this.drag) this.drag = null;
+    cx.notify();
   }
 
   renderMenu() {
@@ -681,35 +737,67 @@ export default class Files extends View {
       .when(this.mode === "menu", el => (m.rootMenu
         ? el.child(row("files-menu-upload", "upload", "Upload files…", "u", () => this.chooseUpload()))
         : el
-          .when(Boolean(m.image), el => el.child(row("files-menu-preview", "preview", "Preview image…", "enter", () => this.openPicture())))
+          .when(Boolean(m.image), el => el.child(row("files-menu-preview", "preview", "Preview image…", "enter", () => this.openPicture(m, true))))
           .child(row("files-menu-download", "download", m.dir ? "Download as zip…" : "Download…", m.image ? "" : "enter", () => this.choose()))
           .child(row("files-menu-upload", "upload", "Upload files…", "u", () => this.chooseUpload()))
           .child(row("files-menu-rename", "rename", "Rename…", "r", (_e, cx) => this.startRename(cx)))
           .child(row("files-menu-delete", "trash", "Delete…", "d", (_e, cx) => this.confirmDelete(cx)))));
   }
 
+  // The corner grip: window pixels in, zoomed layout pixels out.
+  resizeTo(e, cx) {
+    if (!this.drag) return;
+    const z = this.zoom || 1;
+    const w = clamp(this.drag.w + (e.position.x - this.drag.x) / z, PREVIEW_MIN.width, this.maxW);
+    const h = clamp(this.drag.h + (e.position.y - this.drag.y) / z, PREVIEW_MIN.height, this.maxH);
+    if (w !== this.w || h !== this.h) { this.w = w; this.h = h; cx.notify(); }
+  }
+
   renderPicture(cx) {
     const t = theme(), p = this.picture;
-    // A fixed budget keeps the popup and the picture stable: measuring the
-    // content would feed the picture's own size back into it.
-    const maxW = 760 - 24;
-    const maxH = 580 - 42 - 28 - 24;
-    return v_flex().id("files-picture").track_focus(this.handle).size_full().min_h(0).rounded(10).overflow_hidden()
+    // The card's own width and height are the window's content size: the
+    // host follows them when the corner grip or the header button changes
+    // them. A fixed budget would clip a large picture.
+    const maxW = Math.max(0, this.w - 24);
+    const maxH = Math.max(0, this.h - 42 - 28 - 24);
+    const big = this.w >= this.maxW - 2 && this.h >= this.maxH - 2;
+    const button = (id, icon, action) => div().id(id).w(22).h(22).flex_none().rounded(5).flex().items_center().justify_center()
+      .text_color(t.muted).cursor_pointer().hover(s => s.bg(t.hover).text_color(t.foreground))
+      .on_mouse_down("left", (_e, cx) => cx.stop_propagation())
+      .on_click(action)
+      .child(svg(`mods/files-extras/${icon}.svg`).size(14));
+    return v_flex().id("files-picture").track_focus(this.handle).relative()
+      .w(this.w).h(this.h).min_w(0).min_h(0).rounded(10).overflow_hidden()
       .bg(t.background).border_1().border_color(t.border).text_color(t.foreground).text_size(13)
       .on_key_down(e => { if (e.key === "escape") closeOverlay(props().overlay); })
+      // Dragging the corner follows the pointer; the header drags the whole
+      // window (the host starts it on any press we do not stop).
+      .on_mouse_move((e, cx) => this.resizeTo(e, cx))
+      .on_mouse_up("left", () => { this.drag = null; })
       .child(h_flex().h(42).flex_none().px(14).gap(8).items_center().border_b(1).border_color(t.border)
         .child(svg("mods/files-extras/file.svg").size(14).flex_none().text_color(t.muted))
         .child(div().flex_1().min_w(0).truncate().child(p.name))
-        .when(Boolean(p.on), el => el.child(div().flex_none().max_w(160).truncate().text_size(12).text_color(t.dim).child(`on ${p.on}`)))
+        .when(Boolean(p.on), el => el.child(div().flex_none().max_w(120).truncate().text_size(12).text_color(t.dim).child(`on ${p.on}`)))
+        .child(button("files-picture-size", big ? "collapse" : "expand", (_e, cx) => this.toggleSize(cx)))
         .child(div().id("files-picture-close").w(22).h(22).flex_none().rounded(5).flex().items_center().justify_center()
           .text_size(16).text_color(t.muted).cursor_pointer().hover(s => s.bg(t.hover).text_color(t.foreground))
+          .on_mouse_down("left", (_e, cx) => cx.stop_propagation())
           .on_click(() => closeOverlay(props().overlay)).child("×")))
       .child(div().id("files-picture-body").flex_1().min_h(0).p(12).flex().items_center().justify_center().overflow_hidden()
         .when(Boolean(this.pictureError), el => el.child(div().max_w(420).text_center().text_size(12.5).text_color(t.dim).child(this.pictureError)))
         .when(!this.pictureError && !this.staged, el => el.child(div().text_size(12.5).text_color(t.dim).child("Loading image…")))
         .when(Boolean(this.staged), el => el.child(image(this.staged.path).max_w(maxW).max_h(maxH))))
-      .when(Boolean(this.staged), el => el.child(h_flex().h(28).flex_none().px(14).items_center().border_t(1).border_color(t.border)
-        .child(div().text_size(11).text_color(t.dim).child(`${sizeText(this.bytes)} · Esc to close`))));
+      .when(Boolean(this.staged), el => el.child(h_flex().h(28).flex_none().px(14).pr(22).items_center().border_t(1).border_color(t.border)
+        .child(div().text_size(11).text_color(t.dim).child(`${sizeText(this.bytes)} · drag to move · Esc to close`))))
+      .child(div().id("files-picture-grip").absolute().bottom(3).right(3).w(14).h(14).flex().items_center().justify_center()
+        .cursor_nwse_resize()
+        .on_mouse_down("left", (e, cx) => {
+          cx.stop_propagation();
+          this.drag = { x: e.position.x, y: e.position.y, w: this.w, h: this.h };
+        })
+        .on_mouse_move((e, cx) => this.resizeTo(e, cx))
+        .on_mouse_up("left", () => { this.drag = null; })
+        .child(svg("mods/files-extras/resize.svg").size(14).text_color(t.dim)));
   }
 
   render(cx) {

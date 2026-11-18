@@ -4,7 +4,7 @@
 
 ![The Download menu over the Files panel](preview.png)
 
-![The image preview popup](image-preview.png)
+![The image preview window](image-preview.png)
 
 A Herdr mod: the app's shipped Files panel, forked and given a right-click
 menu that downloads a file to this Mac (a file on another machine is brought
@@ -12,7 +12,7 @@ back from there), downloads a folder as a zip, and renames or deletes an
 entry. Files and folders can be dragged in from Finder — or picked from a
 native dialog — to land in the folder being browsed, even when it lives on
 another machine. `.md` files preview as rendered Markdown, and an image
-previews in a popup. Everything else — the lazy tree, git status marks, text
+previews in a window. Everything else — the lazy tree, git status marks, text
 preview — is the shipped panel.
 
 ## What you see
@@ -39,17 +39,20 @@ preview — is the shipped panel.
   (preview for an image, download otherwise); Esc or a press outside closes
   the menu. Rename turns the rows into a name field; Delete turns them into a
   confirmation.
-- **Preview**: a selected file replaces the tree. The header shows its name;
-  body text is a read-only editor at 12 px with the theme's syntax colours,
-  or the Markdown view for `.md`. A NUL byte reads as "Binary file · no text
-  preview"; an image says "Image · right-click and choose Preview image…";
-  unreadable files say so.
-- **Image preview** is a 760 × 580 pointer popup holding a card like the
-  panel's. Its 42 px header has a 14 px file icon, the name truncated, `on
-  <machine>` when needed, and a 22 px ✕. The body is 12 px padding with the
-  picture centred and scaled down to fit; the 28 px footer says `<size> · Esc
-  to close`. Esc, ✕ or a press outside closes it, and the temp copy goes with
-  it.
+- **Preview**: a selected text file replaces the tree. The header shows its
+  name; body text is a read-only editor at 12 px with the theme's syntax
+  colours, or the Markdown view for `.md`. A NUL byte reads as "Binary file ·
+  no text preview"; unreadable files say so. An image does not use this view:
+  clicking it opens the image window and the tree stays as it was.
+- **Image preview** is a movable window that opens filled to the work area: a
+  card like the panel's. Its 42 px header has a 14 px file icon, the name
+  truncated, `on <machine>` when needed, a fill/compact button, and a 22 px
+  ✕. The body is 12 px padding with the picture centred and scaled to fit;
+  the 28 px footer says `<size> · drag to move · Esc to close`. Drag the
+  header to move it and the bottom-right grip to resize it; the header button
+  toggles between filled and 760 × 580. Clicking an image in the tree or a
+  search result opens it, and the menu's **Preview image…** does the same.
+  Esc or ✕ closes it, and the temp copy goes with it.
 
 ## The panel
 
@@ -153,11 +156,25 @@ preview — is the shipped panel.
 ## Image previews
 
 - **Which files**: the extension is one of png, jpg/jpeg, gif, webp, bmp, ico,
-  tif/tiff or svg (`image.js`). The menu gets the extra row; Enter previews.
-- **The popup** is another copy of this mod:
-  `openOverlay({ mod: "files-extras", kind: "popup", width: 760, height: 580,
-  props: { image: { source, name, on } } })`. Its `init` focuses a handle for
-  Esc and calls `loadPicture`.
+  tif/tiff or svg (`image.js`). Clicking the row opens the window; the menu
+  gets the extra Preview row (Enter previews).
+- **Opening**: `openPicture` is the one path, used by `show` for a click (tree
+  or search) and by the menu's Preview row:
+  `openOverlay({ mod: "files-extras", kind: "window", key:
+  "files-extras-image", at: previewAt(), props: { image: { source, name, on }
+  } })`. It is a `window`, not a popup: it drags by any press the mod does not
+  stop, stays open until closed, and replaces the previous preview by its key.
+  Its `init` focuses a handle for Esc and calls `loadPicture`.
+- **Fill and resize**: the card's own `w(this.w).h(this.h)` is the window's
+  content size, so the host follows it. `init` sets `this.w/h` to the filled
+  size; the bottom-right grip's `on_mouse_move` changes them and the header
+  button toggles between that size and 760 × 580. The host anchors content
+  growth at `at`, so the gripper moves the corner rather than the card's
+  centre.
+- **Sizing units**: `window.viewport_size()` (the global GPUI window, not
+  `herdr`'s platform object) is in window px, and so is `at`; overlay
+  `width`/`height` are zoomed layout px. `init` divides the viewport budget
+  by `settings().zoom`; the grip divides pointer deltas by the same zoom.
 - **Why a copy**: `image()` resolves a path from `~/.config/herdr-app`, not
   from the file that asked; an absolute path draws nothing. `stageImage`
   copies the picture to `data/files-preview-<time>-<rand>/image.<ext>`, which
@@ -167,11 +184,10 @@ preview — is the shipped panel.
 - **Limits**: `wc -c` (or `(Get-Item).Length`) reads the size first: missing
   says "This file is no longer available", empty says "This image is empty",
   over 32 MB names the limit. A staging failure shows the command's error.
-- **Sizing**: the picture is `image(path).max_w(736).max_h(486)`, which
-  scales it down and keeps its shape without enlarging it. Those are the
-  popup's 760 × 580 less the 24 px padding, 42 px header and 28 px footer.
-  Measuring the body instead feeds the picture's size back into it, so the
-  budget stays fixed.
+- **Picture size**: the picture is `image(path).max_w(this.w - 24).max_h(this.h
+  - 42 - 28 - 24)`, which scales it down and keeps its shape without enlarging
+  it. The card size is therefore the budget, so a big window shows a big
+  picture rather than clipping a fixed one.
 - **Cleanup**: `close(cx)` removes the temp folder, including a stage the
   copy is still filling: `stageImage`'s `onDir` records the folder as soon as
   it exists, and `close` removes it by name.
@@ -196,15 +212,24 @@ preview — is the shipped panel.
 - `md.js` — the Markdown renderer, adapted from
   [herdr-openspec](https://github.com/AshMcConnell/herdr-openspec) (MIT),
   plus GFM tables. It uses the fixed Tokyo Night palette.
-- `download.svg`, `upload.svg`, `rename.svg`, `trash.svg` and `preview.svg` —
-  the lucide download, upload, pencil, trash and eye glyphs;
-  chevron, file and folder icons are the shipped ones.
-  chevron, file and folder icons are the shipped ones.
+- `download.svg`, `upload.svg`, `rename.svg`, `trash.svg`, `preview.svg`,
+  `expand.svg`, `collapse.svg` and `resize.svg` — the lucide download, upload,
+  pencil, trash and eye glyphs, the maximize/minimize pair, and the corner
+  grip; chevron, file and folder icons are the shipped ones.
 
 ## Watch out
 
 - `image()` takes an app-relative path: an absolute path draws nothing. That is
   why previews are staged under `data/files-preview-*` first.
+- A window overlay sized by its content follows `w()`/`h()` changes; one
+  opened with `width`/`height` does not, so the preview deliberately leaves
+  both out. The host anchors growth at `at`, which keeps the resize grip's
+  pointer math stable.
+- Overlay `width`/`height` are zoomed layout px while `at` and
+  `viewport_size()` are window px; divide by `settings().zoom`. On this Mac
+  the zoom was 1.1, so a 760 px card rendered about 836 px wide.
+- A window does not take the keyboard when it opens; the preview focuses its
+  own handle in `init` so Esc works. A popup still takes it.
 - `writeTextFile` stops at 1 MiB and `exec` at 8 MiB; the part and chunk
   sizes are set from those limits. Bigger limits allow bigger pieces.
 - `exec` rejects for a machine it does not know, so the remote path has to
@@ -234,9 +259,11 @@ preview — is the shipped panel.
   `~/Downloads` first, then the last folder used; the saved bytes match
   (`cmp`).
 - Right-clicking a folder saves a zip that unzips to the same tree.
-- Right-clicking an image shows Preview image…; the popup draws it scaled to
-  fit, Esc and ✕ close it, and its `data/files-preview-*` folder is gone
-  afterwards. A file over 32 MB says so.
+- Clicking an image opens the preview window filled to the work area; a
+  right-click → Preview image… does the same. Drag the header to move it, the
+  bottom-right grip to resize it, and the header button to shrink it to
+  760 × 580 and back. Esc and ✕ close it, and its `data/files-preview-*`
+  folder is gone afterwards. A file over 32 MB says so.
 - On a space on another machine, all of these still work and the bytes match.
 - A cancel in the save panel does nothing; a failure shows an error toast.
 - Dropping files onto the tree lands them in the root, and onto a folder
