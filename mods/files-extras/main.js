@@ -1,13 +1,14 @@
 // A lazy file browser for the focused pane's folder, with bounded read-only previews.
-import { View, div, svg } from "gpui-kit";
+import { View, div, svg, image } from "gpui-kit";
 import { v_flex, h_flex, Editor, EditorState, InputState, Input, ScrollHandle } from "gpui-base";
 import { spaces, panes, focused, exec, readTextFile, writeTextFile, watchFolder, theme, settings, window, props,
   home, appHome, notify, openOverlay, closeOverlay, shared, setShared, pickFolder } from "herdr";
 import { mdView } from "./md.js";
-import { chooseDestination, downloadFile, downloadFolder, hasZip, sizeText } from "./download.js";
+import { chooseDestination, cleanTemp, downloadFile, downloadFolder, fileSize, hasZip, sizeText } from "./download.js";
 import { describe, pickUploads, uploadItems } from "./upload.js";
 import { renameEntry, deleteEntry } from "./fileops.js";
 import { rank } from "./fuzzy.js";
+import { isImage, MAX_PREVIEW, stageImage } from "./image.js";
 
 function location() {
   // A pane or layout can pin the folder: props { folder: "/path" }. Without
@@ -156,9 +157,9 @@ function report(r, targetPath) {
 export default class Files extends View {
   init(_props, cx) {
     // The right-click menu is this same mod opened as a pointer popup with
-    // props { menu: { source, name, dir, on, target, parent } }: it draws
-    // just the menu, which is either its rows, a rename field, or a delete
-    // confirmation. The field's state is built here, in init, where the
+    // props { menu: { source, name, dir, image, on, target, parent } }: it
+    // draws just the menu, which is either its rows, a rename field, or a
+    // delete confirmation. The field's state is built here, in init, where the
     // live host call exists — the same rule as the search field.
     this.menu = props()?.menu ?? null;
     if (this.menu) {
@@ -167,6 +168,9 @@ export default class Files extends View {
       this.rename.input.on("submit", (_e, cx) => this.doRename(cx));
       this.handle = cx.focus_handle(); this.handle.focus(); return;
     }
+    // The image preview is another popup with props { image: { source, name, on } }.
+    this.picture = props()?.image ?? null;
+    if (this.picture) { this.handle = cx.focus_handle(); this.handle.focus(); this.loadPicture(cx); return; }
     this.saved = new Map();
     this.entries = new Map(); this.folders = new Set(); this.pending = new Set(); this.marks = {};
     this.uploading = false;
@@ -289,6 +293,8 @@ export default class Files extends View {
   show(path, cx) {
     this.code?.release(); this.code = null; this.md = null; this.file = path; this.fileError = null;
     if (!path || !cx) return;
+    // The panel shows text; an image belongs in the preview popup.
+    if (isImage(path)) { this.fileError = "Image · right-click and choose Preview image…"; return; }
     const context = this.context, root = this.root, on = this.on;
     const target = absolutePath(path) ? path : `${root}/${path}`;
     cx.spawn(async cx => {
@@ -306,6 +312,41 @@ export default class Files extends View {
       } catch { if (this.file === path && this.current(context)) this.fileError = "Cannot preview this file (binary, too large, or unreadable)"; }
       finally { cx.notify(); }
     });
+  }
+
+  // Stage the image under the app's own folder, which is the only place
+  // `image()` loads from. A file on another machine comes back first.
+  loadPicture(cx) {
+    const p = this.picture, platform = window()?.platform ?? "linux";
+    this.platform = platform;
+    cx.spawn(async cx => {
+      try {
+        const bytes = await fileSize(exec, p.on, p.source, platform);
+        if (this.closed) return;
+        if (bytes === null) { this.pictureError = "This file is no longer available"; return; }
+        if (bytes === 0) { this.pictureError = "This image is empty"; return; }
+        if (bytes > MAX_PREVIEW) { this.pictureError = `Too large to preview (${sizeText(bytes)}; the limit is ${sizeText(MAX_PREVIEW)})`; return; }
+        const staged = await stageImage({ exec, platform, appHome: appHome(), source: p.source, name: p.name, on: p.on, writeTextFile,
+          onDir: dir => { this.staging = dir; } });
+        this.staging = null;
+        if (this.closed) { await cleanTemp(exec, platform, staged.dir).catch(() => {}); return; }
+        this.staged = staged; this.bytes = bytes;
+      } catch (e) {
+        if (!this.closed) this.pictureError = String(e?.message ?? e);
+      } finally {
+        if (!this.closed) cx.notify();
+      }
+    });
+  }
+
+  // The popup's temp copy goes when the popup does, even mid-copy.
+  async close() {
+    this.closed = true;
+    const dirs = [...new Set([this.staged?.dir, this.staging].filter(Boolean))];
+    this.staged = null;
+    this.staging = null;
+    const platform = this.platform ?? window()?.platform ?? "linux";
+    await Promise.all(dirs.map(dir => cleanTemp(exec, platform, dir).catch(() => {})));
   }
 
   rows(prefix, depth, out, t) {
@@ -336,8 +377,9 @@ export default class Files extends View {
     const cut = path.lastIndexOf("/");
     const rel = entry.dir ? path : cut > 0 ? path.slice(0, cut) : "";
     const parent = cut > 0 ? `${base}/${path.slice(0, cut)}` : base;
-    openOverlay({ mod: "files-extras", kind: "popup", width: 262, height: 170,
-      props: { menu: { source, name: entry.name, dir: entry.dir, on: this.on, target: `${base}${rel ? `/${rel}` : ""}`, parent } } });
+    const picture = !entry.dir && isImage(entry.name);
+    openOverlay({ mod: "files-extras", kind: "popup", width: 262, height: picture ? 202 : 170,
+      props: { menu: { source, name: entry.name, dir: entry.dir, image: picture, on: this.on, target: `${base}${rel ? `/${rel}` : ""}`, parent } } });
   }
 
   // Right-click on the tree itself — its empty space, the only target an
@@ -448,7 +490,7 @@ export default class Files extends View {
       else if (e.key === "escape") this.back(cx);
       return;
     }
-    if (e.key === "enter" && !this.menu.rootMenu) this.choose();
+    if (e.key === "enter" && !this.menu.rootMenu) this.menu.image ? this.openPicture() : this.choose();
     else if (e.key === "u") this.chooseUpload();
     else if (e.key === "r" && !this.menu.rootMenu) this.startRename(cx);
     else if (e.key === "d" && !this.menu.rootMenu) this.confirmDelete(cx);
@@ -605,6 +647,13 @@ export default class Files extends View {
         .children(runs(0, base, t.muted, t.dim)));
   }
 
+  openPicture() {
+    const menu = this.menu;
+    openOverlay({ mod: "files-extras", kind: "popup", width: 760, height: 580,
+      props: { image: { source: menu.source, name: menu.name, on: menu.on } } });
+    closeOverlay(props().overlay);
+  }
+
   renderMenu() {
     const t = theme(), m = this.menu;
     // One menu row: icon, label, key hint, hover, click.
@@ -631,14 +680,41 @@ export default class Files extends View {
         .child(row("files-menu-delete-back", null, "Keep it", "escape", (_e, cx) => this.back(cx))))
       .when(this.mode === "menu", el => (m.rootMenu
         ? el.child(row("files-menu-upload", "upload", "Upload files…", "u", () => this.chooseUpload()))
-        : el.child(row("files-menu-download", "download", m.dir ? "Download as zip…" : "Download…", "enter", () => this.choose()))
+        : el
+          .when(Boolean(m.image), el => el.child(row("files-menu-preview", "preview", "Preview image…", "enter", () => this.openPicture())))
+          .child(row("files-menu-download", "download", m.dir ? "Download as zip…" : "Download…", m.image ? "" : "enter", () => this.choose()))
           .child(row("files-menu-upload", "upload", "Upload files…", "u", () => this.chooseUpload()))
           .child(row("files-menu-rename", "rename", "Rename…", "r", (_e, cx) => this.startRename(cx)))
           .child(row("files-menu-delete", "trash", "Delete…", "d", (_e, cx) => this.confirmDelete(cx)))));
   }
 
+  renderPicture(cx) {
+    const t = theme(), p = this.picture;
+    // A fixed budget keeps the popup and the picture stable: measuring the
+    // content would feed the picture's own size back into it.
+    const maxW = 760 - 24;
+    const maxH = 580 - 42 - 28 - 24;
+    return v_flex().id("files-picture").track_focus(this.handle).size_full().min_h(0).rounded(10).overflow_hidden()
+      .bg(t.background).border_1().border_color(t.border).text_color(t.foreground).text_size(13)
+      .on_key_down(e => { if (e.key === "escape") closeOverlay(props().overlay); })
+      .child(h_flex().h(42).flex_none().px(14).gap(8).items_center().border_b(1).border_color(t.border)
+        .child(svg("mods/files-extras/file.svg").size(14).flex_none().text_color(t.muted))
+        .child(div().flex_1().min_w(0).truncate().child(p.name))
+        .when(Boolean(p.on), el => el.child(div().flex_none().max_w(160).truncate().text_size(12).text_color(t.dim).child(`on ${p.on}`)))
+        .child(div().id("files-picture-close").w(22).h(22).flex_none().rounded(5).flex().items_center().justify_center()
+          .text_size(16).text_color(t.muted).cursor_pointer().hover(s => s.bg(t.hover).text_color(t.foreground))
+          .on_click(() => closeOverlay(props().overlay)).child("×")))
+      .child(div().id("files-picture-body").flex_1().min_h(0).p(12).flex().items_center().justify_center().overflow_hidden()
+        .when(Boolean(this.pictureError), el => el.child(div().max_w(420).text_center().text_size(12.5).text_color(t.dim).child(this.pictureError)))
+        .when(!this.pictureError && !this.staged, el => el.child(div().text_size(12.5).text_color(t.dim).child("Loading image…")))
+        .when(Boolean(this.staged), el => el.child(image(this.staged.path).max_w(maxW).max_h(maxH))))
+      .when(Boolean(this.staged), el => el.child(h_flex().h(28).flex_none().px(14).items_center().border_t(1).border_color(t.border)
+        .child(div().text_size(11).text_color(t.dim).child(`${sizeText(this.bytes)} · Esc to close`))));
+  }
+
   render(cx) {
     if (this.menu) return this.renderMenu();
+    if (this.picture) return this.renderPicture(cx);
     if (key() !== this.context?.key) this.refresh(cx);
     const t = theme(), q = this.search.query.trim();
     return v_flex().id("files").size_full().min_h(0).rounded(10).overflow_hidden().bg(t.background).border_1().border_color(t.border).text_color(t.foreground).text_size(13)

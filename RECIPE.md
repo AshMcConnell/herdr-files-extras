@@ -2,13 +2,18 @@
 
 ![The Download menu over the Files panel](preview.png)
 
-A Herdr mod: the app's shipped Files panel, forked and given three extras. A
-right-click menu downloads a file to this Mac (a file on another machine is
-brought back from there) or downloads a folder as a zip, files and folders
-can be dragged in from Finder — or picked from a native dialog — to land in
-the folder being browsed, even when it lives on another machine, and `.md`
-files preview as rendered Markdown. Everything else — the lazy tree, git
-status marks, text preview — is the shipped panel.
+![The Download menu over the Files panel](preview.png)
+
+![The image preview popup](image-preview.png)
+
+A Herdr mod: the app's shipped Files panel, forked and given a right-click
+menu that downloads a file to this Mac (a file on another machine is brought
+back from there), downloads a folder as a zip, and renames or deletes an
+entry. Files and folders can be dragged in from Finder — or picked from a
+native dialog — to land in the folder being browsed, even when it lives on
+another machine. `.md` files preview as rendered Markdown, and an image
+previews in a popup. Everything else — the lazy tree, git status marks, text
+preview — is the shipped panel.
 
 ## What you see
 
@@ -21,18 +26,30 @@ status marks, text preview — is the shipped panel.
   files), a 14 px `muted` file/folder icon, the name (flex 1, truncated),
   and a git mark in 11 px: `A` in `ansi2`, `D`/`U` in `ansi1`, `M` in
   `blocked`. Folders come first, then names in locale order.
-- **The menu** is a 262 × 106 px pointer popup on `popover`, padded 5 px. The
-  header row (9 px sides, 3 top, 5 bottom, 7 gap) has a 13 px file or folder
-  icon in `muted`, the name truncated, and `on <machine>` in 11 px `dim`
-  when the file lives elsewhere. Below it two 32 px rows: 9 px sides, 9 gap,
-  radius 7, hover `hover`, a 14 px icon and an 11 px `dim` key hint —
-  **Download…** for a file (**Download as zip…** for a folder) with `enter`,
-  and **Upload files…** with `u`. Enter runs Download, `u` runs Upload; Esc
-  or a press outside closes the menu.
+- **The menu** is a 262 px pointer popup on `popover`, padded 5 px: 170 px
+  tall for an entry, 202 px with the image-preview row, and 74 px on the
+  tree's empty space (upload only). The header row (9 px sides, 3 top, 5
+  bottom, 7 gap) has a 13 px file or folder icon in `muted`, the name
+  truncated, and `on <machine>` in 11 px `dim` when the file lives elsewhere.
+  The rows are 32 px: 9 px sides, 9 gap, radius 7, hover `hover`, a 14 px
+  icon, the label, and an 11 px `dim` key hint. **Preview image…** with
+  `enter` (images only), **Download…** for a file (**Download as zip…** for a
+  folder) with `enter` — no hint when Preview has it — **Upload files…** with
+  `u`, **Rename…** with `r`, **Delete…** with `d`. Enter runs the default
+  (preview for an image, download otherwise); Esc or a press outside closes
+  the menu. Rename turns the rows into a name field; Delete turns them into a
+  confirmation.
 - **Preview**: a selected file replaces the tree. The header shows its name;
   body text is a read-only editor at 12 px with the theme's syntax colours,
   or the Markdown view for `.md`. A NUL byte reads as "Binary file · no text
-  preview"; unreadable files say so.
+  preview"; an image says "Image · right-click and choose Preview image…";
+  unreadable files say so.
+- **Image preview** is a 760 × 580 pointer popup holding a card like the
+  panel's. Its 42 px header has a 14 px file icon, the name truncated, `on
+  <machine>` when needed, and a 22 px ✕. The body is 12 px padding with the
+  picture centred and scaled down to fit; the 28 px footer says `<size> · Esc
+  to close`. Esc, ✕ or a press outside closes it, and the temp copy goes with
+  it.
 
 ## The panel
 
@@ -58,9 +75,9 @@ status marks, text preview — is the shipped panel.
 
 - **The menu** is the same mod opened again:
   `openOverlay({ mod: "files-extras", kind: "popup", width: 262, height: 74,
-  props: { menu: { source, name, dir, on } } })`. The copy's `init` returns
-  as soon as `props().menu` exists, focuses a handle for Enter/Esc, and
-  renders only the menu.
+  props: { menu: { source, name, dir, image, on } } })` (106 px tall for an
+  image). The copy's `init` returns as soon as `props().menu` exists, focuses
+  a handle for Enter/Esc, and renders only the menu.
 - **Choosing** closes the popup, then downloads in a plain async function
   (no `cx`), so closing the popup cannot cancel it. Success and failure are
   toasts with the saved path (and size for a file from another machine).
@@ -133,29 +150,61 @@ status marks, text preview — is the shipped panel.
   collapsed (the folder watch only refreshes folders already expanded), or
   the root reloads.
 
+## Image previews
+
+- **Which files**: the extension is one of png, jpg/jpeg, gif, webp, bmp, ico,
+  tif/tiff or svg (`image.js`). The menu gets the extra row; Enter previews.
+- **The popup** is another copy of this mod:
+  `openOverlay({ mod: "files-extras", kind: "popup", width: 760, height: 580,
+  props: { image: { source, name, on } } })`. Its `init` focuses a handle for
+  Esc and calls `loadPicture`.
+- **Why a copy**: `image()` resolves a path from `~/.config/herdr-app`, not
+  from the file that asked; an absolute path draws nothing. `stageImage`
+  copies the picture to `data/files-preview-<time>-<rand>/image.<ext>`, which
+  `image()` then draws. A local file is `cp` (`Copy-Item` on Windows); a file
+  on another machine takes the same `dd`/`base64` pieces as a download, then
+  the local decode.
+- **Limits**: `wc -c` (or `(Get-Item).Length`) reads the size first: missing
+  says "This file is no longer available", empty says "This image is empty",
+  over 32 MB names the limit. A staging failure shows the command's error.
+- **Sizing**: the picture is `image(path).max_w(736).max_h(486)`, which
+  scales it down and keeps its shape without enlarging it. Those are the
+  popup's 760 × 580 less the 24 px padding, 42 px header and 28 px footer.
+  Measuring the body instead feeds the picture's size back into it, so the
+  budget stays fixed.
+- **Cleanup**: `close(cx)` removes the temp folder, including a stage the
+  copy is still filling: `stageImage`'s `onDir` records the folder as soon as
+  it exists, and `close` removes it by name.
+
 ## The files
 
-- `main.js` — the panel (from the shipped `files` mod), the menu, and the
-  `download(menu)` / `uploadMenu(menu)` orchestrations, which call the
-  helpers below.
+- `main.js` — the panel (from the shipped `files` mod), the menu, the image
+  preview, and the `download(menu)` / `uploadMenu(menu)` orchestrations,
+  which call the helpers below.
 - `download.js` — the download work, with every host call passed in as an
   argument: `chooseDestination`, `hasZip`, `downloadFile`, `downloadFolder`,
-  `uniquePath`, `addSuffix`, `sizeText`, and the `extractor` probe uploads
-  reuse. It imports nothing, so a plain Node script can exercise the shell
-  commands with a fake `exec`.
+  `uniquePath`, `addSuffix`, `sizeText`, `fileSize`, `tempFolder`,
+  `cleanTemp`, and the `extractor` probe uploads reuse. It imports nothing,
+  so a plain Node script can exercise the shell commands with a fake `exec`.
 - `upload.js` — the upload work, same shape: `describe` (what dropped paths
   are), `listNames`/`uniqueNames`, `uploadFile`, `uploadFolder`,
   `pickUploads`, and the `uploadItems` batch driver. Imports only
   `download.js`, so it runs under plain Node against a real `exec` — the
   remote paths included, through `hc exec --on`.
+- `image.js` — image extensions, the 32 MB limit, and `stageImage`, which
+  copies a picture into the app folder and returns its app-relative path.
 - `md.js` — the Markdown renderer, adapted from
   [herdr-openspec](https://github.com/AshMcConnell/herdr-openspec) (MIT),
   plus GFM tables. It uses the fixed Tokyo Night palette.
-- `download.svg` — the lucide download glyph, `upload.svg` its reverse;
+- `download.svg`, `upload.svg`, `rename.svg`, `trash.svg` and `preview.svg` —
+  the lucide download, upload, pencil, trash and eye glyphs;
+  chevron, file and folder icons are the shipped ones.
   chevron, file and folder icons are the shipped ones.
 
 ## Watch out
 
+- `image()` takes an app-relative path: an absolute path draws nothing. That is
+  why previews are staged under `data/files-preview-*` first.
 - `writeTextFile` stops at 1 MiB and `exec` at 8 MiB; the part and chunk
   sizes are set from those limits. Bigger limits allow bigger pieces.
 - `exec` rejects for a machine it does not know, so the remote path has to
@@ -185,7 +234,10 @@ status marks, text preview — is the shipped panel.
   `~/Downloads` first, then the last folder used; the saved bytes match
   (`cmp`).
 - Right-clicking a folder saves a zip that unzips to the same tree.
-- On a space on another machine, both still work and the bytes match.
+- Right-clicking an image shows Preview image…; the popup draws it scaled to
+  fit, Esc and ✕ close it, and its `data/files-preview-*` folder is gone
+  afterwards. A file over 32 MB says so.
+- On a space on another machine, all of these still work and the bytes match.
 - A cancel in the save panel does nothing; a failure shows an error toast.
 - Dropping files onto the tree lands them in the root, and onto a folder
   row inside it; a name already there arrives as `name (2).ext`, the

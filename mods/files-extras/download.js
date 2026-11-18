@@ -14,7 +14,9 @@ const PART = 1000000;
 
 export const trimEnd = (path) => path.replace(/[\\/]+$/, "");
 export const norm = (path) => trimEnd(path).replace(/\\/g, "/");
-const mb = (bytes) => `${(bytes / (1024 * 1024)).toFixed(bytes < 10 * 1024 * 1024 ? 1 : 0)} MB`;
+const mb = (bytes) => bytes < 1024 ? `${bytes} B`
+  : bytes < 1024 * 1024 ? `${Math.round(bytes / 1024)} KB`
+  : `${(bytes / (1024 * 1024)).toFixed(bytes < 10 * 1024 * 1024 ? 1 : 0)} MB`;
 
 // `foo.txt` at 2 becomes `foo (2).txt`; a dotfile stays whole.
 export function addSuffix(name, n) {
@@ -101,16 +103,29 @@ export async function extractor(exec, on) {
   return r.stdout.trim() || null;
 }
 
-async function tempFolder(exec, platform, appHome) {
-  const dir = `${appHome}/data/files-download-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+export async function tempFolder(exec, platform, appHome, label = "files-download") {
+  const dir = `${appHome.replace(/[\\/]+$/, "")}/data/${label}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
   if (platform === "windows") await ps(exec, null, `New-Item -ItemType Directory -Force -Path ${psq(dir)} | Out-Null`);
   else await shell(exec, null, 'mkdir -p "$1"', [dir]);
   return dir;
 }
 
-async function cleanTemp(exec, platform, dir) {
+export async function cleanTemp(exec, platform, dir) {
   if (platform === "windows") await ps(exec, null, `Remove-Item -LiteralPath ${psq(dir)} -Recurse -Force -ErrorAction SilentlyContinue`);
   else await sh(exec, null, 'rm -rf "$1"', [dir]);
+}
+
+// A file's size in bytes, or null when it is missing or unreadable.
+export async function fileSize(exec, on, path, platform) {
+  if (!on && platform === "windows") {
+    const r = await ps(exec, null, `try { (Get-Item -LiteralPath ${psq(path)} -ErrorAction Stop).Length } catch { exit 1 }`).catch(() => null);
+    const n = r ? Number(r.stdout.trim()) : NaN;
+    return Number.isFinite(n) ? n : null;
+  }
+  const r = await sh(exec, on, 'wc -c < "$1" 2>/dev/null', [path]);
+  if (r.code !== 0) return null;
+  const n = Number(r.stdout.trim());
+  return Number.isFinite(n) ? n : null;
 }
 
 async function decode({ exec, platform, dir, dest }) {

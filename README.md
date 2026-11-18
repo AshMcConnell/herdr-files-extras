@@ -1,19 +1,28 @@
 # Files extras for Herdr
 
 Herdr's Files panel with **right-click downloads**, **drag & drop uploads**,
-and **Markdown previews**. Right-click a file to save a copy to this Mac, or
-a folder to download it as a zip; a space on another machine works the same
-way and the file is copied back from there. Drag files or folders from
-Finder onto the tree to put them in the folder being browsed — on this
-machine or on another one.
+**Markdown previews** and **image previews**. Right-click a file to save a
+copy to this Mac, or a folder to download it as a zip; a space on another
+machine works the same way and the file is copied back from there. Drag files
+or folders from Finder onto the tree to put them in the folder being browsed —
+on this machine or on another one. Right-click an image to see it in a popup.
 
 It is a fork of Herdr's shipped `files` mod, so the lazy tree, git status
 marks and text preview stay exactly as they were.
 
 ![The Download menu over the Files panel](preview.png)
 
+Right-click an image and choose **Preview image…**; the popup scales the
+picture to fit:
+
+![An image preview popup](image-preview.png)
+
 ## What it adds
 
+- **Right-click an image → Preview image…** The picture opens in a popup,
+  scaled to fit and up to 32 MB. Esc, the ✕, or a click outside closes it; the
+  temp copy goes with it. An image on another machine is brought back first,
+  like a download.
 - **Right-click a file → Download…** A save panel opens at the last folder
   you used (the first time, `~/Downloads`). The file is copied there; on a
   space on another machine it is first brought back from that machine.
@@ -115,21 +124,33 @@ edit in the checkout never reloads it).
   start, success (count and size) and any per-item failures. Temp archives
   under `~/.config/herdr-app/data/` are removed afterwards.
 
+## How image previews work
+
+- Herdr's `image()` loads pictures from its own folder
+  (`~/.config/herdr-app`), not from an absolute path. So an image is copied
+  first to `data/files-preview-<time>-<random>/image.<ext>`; a local file is a
+  `cp`, and a file on another machine takes the same base64 trip as a
+  download. The temp folder is removed when the popup closes.
+- The size is read before the copy. Previews stop at 32 MB; a missing file,
+  an empty file and a staging failure each say what happened in the popup.
+- The picture keeps its shape and is scaled down to fit; a small picture is
+  not enlarged.
+
 ## What it runs
 
 Like any Herdr mod it is trusted code. It runs `exec` with `sh`, `zip`,
-`tar`, `base64`, `dd`, `wc`, `mv` and `rm`, plus `osascript` on macOS for
-the save panel and the upload picker; on Windows it uses `powershell`
-(`Copy-Item`, `Compress-Archive`, `Rename-Item`, `Remove-Item`, the
-OpenFileDialog, base64 decode) and `cmd` for the upload redirect. Uploads
+`tar`, `base64`, `dd`, `wc`, `cp`, `mv` and `rm`, plus `osascript` on macOS
+for the save panel and the upload picker; on Windows it uses `powershell`
+(`Copy-Item`, `Compress-Archive`, `Rename-Item`, `Remove-Item`, `Get-Item`,
+the OpenFileDialog, base64 decode) and `cmd` for the upload redirect. Uploads
 to another machine run local `hc` (herdr-core), which carries the file to
 that machine. On a space on another machine the same commands run there
 through herdr-core.
 
-It writes only the file or archive you choose, plus temporary base64 pieces
-and upload archives under `~/.config/herdr-app/data/`, which it removes
-afterwards. It never writes into the folder it is browsing except the files
-you asked to put there.
+It writes only the file or archive you choose, plus temporary base64 pieces,
+upload archives and preview copies under `~/.config/herdr-app/data/`, which
+it removes afterwards. It never writes into the folder it is browsing except
+the files you asked to put there.
 
 ## Built on
 
